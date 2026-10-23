@@ -1,7 +1,15 @@
 import json
 import os
+import threading
 
-from PyQt5.QtCore import QObject, QThread, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import (
+    QObject,
+    QThread,
+    Qt,
+    pyqtProperty,
+    pyqtSignal,
+    pyqtSlot,
+)
 
 from UM.Application import Application
 from steslicer.Stages.SteSlicerStage import SteSlicerStage
@@ -10,6 +18,17 @@ from .config.llm_client import LlmError, complete
 from .mcp.registry import ToolRegistry
 from .mcp.server import McpServer
 from .mcp.slicer_tools import SlicerTools
+
+
+class _MainThreadRequest(object):
+    def __init__(self, callback):
+        self.callback = callback
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.started = False
+        self.cancelled = False
+        self.result = None
+        self.error = None
 
 
 class LlmWorker(QObject):
@@ -38,6 +57,7 @@ class AssistantBridge(QObject):
     requestStarted = pyqtSignal()
     requestFailed = pyqtSignal(str)
     statusChanged = pyqtSignal()
+    _main_thread_request = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,11 +75,54 @@ class AssistantBridge(QObject):
         self._worker = None
         self._mcp_server = None
         self._slicer_tools = None
+        self._main_thread_request.connect(
+            self._handle_main_thread_request,
+            Qt.QueuedConnection,
+        )
         self._pending_tool_request = False
         self._tool_rounds = 0
 
+    def _dispatch_slicer_callback(self, callback):
+        if QThread.currentThread() == self.thread():
+            return callback()
+
+        request = _MainThreadRequest(callback)
+        self._main_thread_request.emit(request)
+        if not request.event.wait(30):
+            with request.lock:
+                if not request.event.is_set():
+                    if not request.started:
+                        request.cancelled = True
+                        raise RuntimeError(
+                            "Тайм-аут: операция отменена до запуска."
+                        )
+                    raise RuntimeError(
+                        "Тайм-аут: операция уже выполняется; результат неизвестен. "
+                        "Не повторяйте её автоматически."
+                    )
+        if request.error is not None:
+            raise request.error
+        return request.result
+
+    @pyqtSlot(object)
+    def _handle_main_thread_request(self, request):
+        with request.lock:
+            if request.cancelled:
+                request.event.set()
+                return
+            request.started = True
+        try:
+            request.result = request.callback()
+        except Exception as error:
+            request.error = error
+        finally:
+            request.event.set()
+
     def configure_mcp(self, application):
-        self._slicer_tools = SlicerTools(application)
+        self._slicer_tools = SlicerTools(
+            application,
+            dispatch=self._dispatch_slicer_callback,
+        )
         registry = ToolRegistry()
         registry.register(
             "scene.list_objects",
@@ -143,8 +206,8 @@ class AssistantBridge(QObject):
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.failed.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._cleanup_request)
         self._thread.start()
 
@@ -153,16 +216,21 @@ class AssistantBridge(QObject):
         if tool_calls:
             if self._tool_rounds >= 4:
                 self._set_status("Слишком много последовательных действий")
-                self.requestFailed.emit("Остановлено: превышен лимит последовательных вызовов инструментов.")
+                self.requestFailed.emit(
+                    "Остановлено: превышен лимит последовательных вызовов инструментов."
+                )
+                self._thread.quit()
                 return
             self._tool_rounds += 1
             assistant_message = {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
             self._history.append(assistant_message)
             self._execute_tool_calls(tool_calls)
             self._pending_tool_request = True
+            self._thread.quit()
             return
 
         self._history.append({"role": "assistant", "content": reply or ""})
+        self._thread.quit()
         self._set_status("Готов к работе")
         self.replyReady.emit(reply or "")
 
@@ -191,11 +259,11 @@ class AssistantBridge(QObject):
     def _on_failed(self, error):
         self._set_status("Ошибка запроса")
         self.requestFailed.emit(error)
+        if self._thread is not None:
+            self._thread.quit()
 
     @pyqtSlot()
     def _cleanup_request(self):
-        if self._worker is not None:
-            self._worker.deleteLater()
         if self._thread is not None:
             self._thread.deleteLater()
         self._worker = None
