@@ -149,6 +149,30 @@ class AssistantBridge(QObject):
             self._slicer_tools.arrange_scene,
             requires_confirmation=True,
         )
+        registry.register(
+            "scene.move_object",
+            "Move one mesh object to an absolute world position in millimeters.",
+            {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": ["string", "number"]},
+                    "position": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "z": {"type": "number"},
+                        },
+                        "required": ["x", "y", "z"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["object_id", "position"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.move_object,
+            requires_confirmation=True,
+        )
         self._mcp_server = McpServer(registry)
 
     def _openai_tools(self):

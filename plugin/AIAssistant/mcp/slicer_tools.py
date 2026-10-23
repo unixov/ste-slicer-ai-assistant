@@ -1,3 +1,7 @@
+import math
+
+from UM.Math.Vector import Vector
+from UM.Operations.TranslateOperation import TranslateOperation
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
 from UM.Scene.Selection import Selection
 
@@ -49,6 +53,54 @@ class SlicerTools(object):
                 "depth": box.depth,
             }
         return item
+
+    def move_object(self, arguments):
+        arguments = arguments or {}
+        object_id = arguments.get("object_id")
+        position = arguments.get("position")
+        if object_id is None or str(object_id).strip() == "":
+            raise ValueError("object_id is required")
+        if not isinstance(position, dict):
+            raise ValueError("position must be an object")
+
+        normalized_position = {}
+        for key in ("x", "y", "z"):
+            if key not in position:
+                raise ValueError("position.%s is required" % key)
+            value = position[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("position.%s must be a number" % key)
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("position.%s must be finite" % key)
+            normalized_position[key] = value
+
+        return self._dispatch(
+            lambda: self._move_object(object_id, normalized_position)
+        )
+
+    def _move_object(self, object_id, position):
+        scene = self._application.getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            if str(node.getId()) != str(object_id):
+                continue
+            if node.getMeshData() is None:
+                raise ValueError("Object is not a mesh: " + str(object_id))
+
+            operation = TranslateOperation(
+                node,
+                Vector(position["x"], position["y"], position["z"]),
+                set_position=True,
+            )
+            operation.push()
+            return {
+                "accepted": True,
+                "object_id": node.getId(),
+                "position": dict(position),
+                "undoable": True,
+                "coordinate_system": "world",
+            }
+        raise ValueError("Mesh object not found: " + str(object_id))
 
     def get_settings(self, arguments):
         return self._dispatch(self._get_settings)
