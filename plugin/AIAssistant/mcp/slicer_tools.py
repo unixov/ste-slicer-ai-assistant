@@ -13,6 +13,7 @@ class SlicerTools(object):
         self._observed_backend = None
         self._backend_state = None
         self._backend_progress = None
+        self._exporter = None
 
     def list_scene_objects(self, arguments):
         return self._dispatch(self._list_scene_objects)
@@ -104,6 +105,38 @@ class SlicerTools(object):
                 "coordinate_system": "world",
             }
         raise ValueError("Mesh object not found: " + str(object_id))
+
+    def export_scene(self, arguments):
+        arguments = arguments or {}
+        file_name = arguments.get("file_name")
+        file_format = arguments.get("file_format")
+        if not isinstance(file_name, str) or not file_name.strip():
+            raise ValueError("file_name is required")
+        if not isinstance(file_format, str) or not file_format.strip():
+            raise ValueError("file_format is required")
+        return self._dispatch(
+            lambda: self._export_scene(file_name, file_format)
+        )
+
+    def _export_scene(self, file_name, file_format):
+        if self._exporter is None:
+            from .exporter import SceneExporter
+            self._exporter = SceneExporter(self._application)
+        return self._exporter.export_scene(file_name, file_format)
+
+    def get_export_status(self, arguments):
+        return self._dispatch(self._get_export_status)
+
+    def _get_export_status(self):
+        if self._exporter is None:
+            return {
+                "state": "idle",
+                "path": None,
+                "format": None,
+                "progress": None,
+                "error": None,
+            }
+        return self._exporter.get_status()
 
     def start_slicing(self, arguments):
         return self._dispatch(self._start_slicing)

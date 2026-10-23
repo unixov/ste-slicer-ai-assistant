@@ -165,6 +165,27 @@ class AssistantBridge(QObject):
             self._slicer_tools.get_selection,
         )
         registry.register(
+            "export.scene",
+            "Export the current mesh scene to a new .gcode or .3mf file at an explicit path.",
+            {
+                "type": "object",
+                "properties": {
+                    "file_name": {"type": "string"},
+                    "file_format": {"type": "string", "enum": ["gcode", "3mf"]},
+                },
+                "required": ["file_name", "file_format"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.export_scene,
+            requires_confirmation=True,
+        )
+        registry.register(
+            "export.get_status",
+            "Read the asynchronous status of the latest scene export.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_export_status,
+        )
+        registry.register(
             "scene.arrange_all",
             "Arrange models on the active build plate.",
             {"type": "object", "properties": {}, "additionalProperties": False},
