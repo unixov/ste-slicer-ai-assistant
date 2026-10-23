@@ -24,7 +24,7 @@ STE-Slicer/
 *.zip
 
 # Organizer-provided test assets
-Примеры деталей/
+Примеры*/
 
 # Test artifacts and generated output
 artifacts/
