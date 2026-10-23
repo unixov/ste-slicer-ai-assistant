@@ -107,6 +107,66 @@ Rectangle {
             elide: Text.ElideRight
         }
 
+        Rectangle {
+            Layout.fillWidth: true
+            visible: aiAssistantBridge && aiAssistantBridge.confirmationPending
+            color: "transparent"
+            border.width: 1
+            border.color: accentColor
+            radius: 3
+            implicitHeight: confirmationColumn.implicitHeight + 2 * UM.Theme.getSize("default_margin").height
+
+            ColumnLayout {
+                id: confirmationColumn
+                anchors.fill: parent
+                anchors.margins: UM.Theme.getSize("default_margin").width
+                spacing: UM.Theme.getSize("default_margin").height
+
+                Label {
+                    Layout.fillWidth: true
+                    text: "Требуется подтверждение действия"
+                    color: accentColor
+                    font: UM.Theme.getFont("default")
+                    wrapMode: Text.WordWrap
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    text: aiAssistantBridge ? aiAssistantBridge.confirmationTool : ""
+                    color: textColor
+                    font: UM.Theme.getFont("small")
+                    wrapMode: Text.WordWrap
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    text: aiAssistantBridge ? aiAssistantBridge.confirmationArguments : ""
+                    color: mutedColor
+                    font: UM.Theme.getFont("small")
+                    wrapMode: Text.WordWrap
+                    maximumLineCount: 8
+                    elide: Text.ElideRight
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: UM.Theme.getSize("default_margin").width
+
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Выполнить"
+                        onClicked: aiAssistantBridge.confirmAction()
+                    }
+
+                    Button {
+                        Layout.fillWidth: true
+                        text: "Отмена"
+                        onClicked: aiAssistantBridge.cancelAction()
+                    }
+                }
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
             spacing: UM.Theme.getSize("default_margin").width

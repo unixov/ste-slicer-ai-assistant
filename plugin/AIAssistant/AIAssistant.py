@@ -57,6 +57,7 @@ class AssistantBridge(QObject):
     requestStarted = pyqtSignal()
     requestFailed = pyqtSignal(str)
     statusChanged = pyqtSignal()
+    confirmationChanged = pyqtSignal()
     _main_thread_request = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -67,7 +68,10 @@ class AssistantBridge(QObject):
                 "role": "system",
                 "content": (
                     "Ты ассистент по настройке печати в STE Slicer. "
-                    "Пока только отвечай текстом и не утверждай, что изменил сцену."
+                    "Не утверждай, что изменил сцену или выполнил расчёт, "
+                    "если это не подтверждено результатом инструмента. "
+                    "Изменяющие сцену действия выполняются только после явного "
+                    "подтверждения пользователя в панели ассистента."
                 ),
             }
         ]
@@ -80,6 +84,11 @@ class AssistantBridge(QObject):
             Qt.QueuedConnection,
         )
         self._pending_tool_request = False
+        self._pending_tool_calls = []
+        self._pending_confirmation_call = None
+        self._confirmation_pending = False
+        self._confirmation_tool = ""
+        self._confirmation_arguments = ""
         self._tool_rounds = 0
 
     def _dispatch_slicer_callback(self, callback):
@@ -215,6 +224,18 @@ class AssistantBridge(QObject):
     def status(self):
         return self._status
 
+    @pyqtProperty(bool, notify=confirmationChanged)
+    def confirmationPending(self):
+        return self._confirmation_pending
+
+    @pyqtProperty(str, notify=confirmationChanged)
+    def confirmationTool(self):
+        return self._confirmation_tool
+
+    @pyqtProperty(str, notify=confirmationChanged)
+    def confirmationArguments(self):
+        return self._confirmation_arguments
+
     def _set_status(self, value):
         self._status = value
         self.statusChanged.emit()
@@ -222,13 +243,16 @@ class AssistantBridge(QObject):
     @pyqtSlot(str)
     def sendMessage(self, text):
         text = (text or "").strip()
-        if not text or self._thread is not None:
+        if not text or self._thread is not None or self._confirmation_pending:
             return
 
         self._history.append({"role": "user", "content": text})
         self._history[0]["content"] = (
             "Ты ассистент по настройке печати в STE Slicer. "
-            "Пока не утверждай, что изменил сцену или выполнил расчёт прочности.\n\n"
+            "Не утверждай, что изменил сцену или выполнил расчёт прочности, "
+            "если это не подтверждено результатом инструмента. "
+            "Изменяющие сцену действия выполняются только после явного "
+            "подтверждения пользователя в панели ассистента.\n\n"
             + self._scene_context()
         )
         self.messageReceived.emit(text)
@@ -262,8 +286,9 @@ class AssistantBridge(QObject):
             self._tool_rounds += 1
             assistant_message = {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
             self._history.append(assistant_message)
-            self._execute_tool_calls(tool_calls)
-            self._pending_tool_request = True
+            self._pending_tool_calls = list(tool_calls)
+            if self._execute_pending_tool_calls():
+                self._pending_tool_request = True
             self._thread.quit()
             return
 
@@ -272,26 +297,122 @@ class AssistantBridge(QObject):
         self._set_status("Готов к работе")
         self.replyReady.emit(reply or "")
 
-    def _execute_tool_calls(self, tool_calls):
-        for call in tool_calls:
-            function = call.get("function", {})
-            name = function.get("name", "")
-            raw_arguments = function.get("arguments", "{}")
-            try:
-                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-            except (TypeError, ValueError):
-                arguments = {}
-            result = self._mcp_server.handle({
+    @staticmethod
+    def _parse_tool_arguments(call):
+        function = call.get("function", {})
+        raw_arguments = function.get("arguments", "{}")
+        try:
+            arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+        except (TypeError, ValueError):
+            arguments = {}
+        return arguments if isinstance(arguments, dict) else {}
+
+    def _call_tool(self, call, confirmed=False):
+        function = call.get("function", {})
+        name = function.get("name", "")
+        arguments = self._parse_tool_arguments(call)
+        return self._mcp_server.handle({
+            "jsonrpc": "2.0",
+            "id": call.get("id"),
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments,
+                "confirmed": confirmed,
+            },
+        })
+
+    @staticmethod
+    def _requires_confirmation(response):
+        try:
+            text = response["result"]["content"][0]["text"]
+            return bool(json.loads(text).get("requires_confirmation"))
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+
+    def _append_tool_result(self, call, response):
+        self._history.append({
+            "role": "tool",
+            "tool_call_id": call.get("id", ""),
+            "content": json.dumps(response, ensure_ascii=False),
+        })
+
+    def _show_confirmation(self, call):
+        function = call.get("function", {})
+        self._pending_confirmation_call = call
+        self._confirmation_tool = function.get("name", "")
+        self._confirmation_arguments = json.dumps(
+            self._parse_tool_arguments(call),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        self._confirmation_pending = True
+        self._set_status("Ожидание подтверждения")
+        self.confirmationChanged.emit()
+
+    def _execute_pending_tool_calls(self):
+        while self._pending_tool_calls:
+            call = self._pending_tool_calls.pop(0)
+            response = self._call_tool(call)
+            if self._requires_confirmation(response):
+                self._show_confirmation(call)
+                return False
+            self._append_tool_result(call, response)
+        return True
+
+    def _finish_confirmation(self):
+        self._pending_confirmation_call = None
+        self._confirmation_pending = False
+        self._confirmation_tool = ""
+        self._confirmation_arguments = ""
+        self.confirmationChanged.emit()
+
+    @pyqtSlot()
+    def confirmAction(self):
+        call = self._pending_confirmation_call
+        if call is None:
+            return
+        response = self._call_tool(call, confirmed=True)
+        self._append_tool_result(call, response)
+        self._finish_confirmation()
+        self._continue_after_confirmation()
+
+    def _continue_after_confirmation(self):
+        if not self._execute_pending_tool_calls():
+            return
+        if self._thread is None:
+            self._pending_tool_request = False
+            self._start_llm_request()
+        else:
+            self._pending_tool_request = True
+
+    @pyqtSlot()
+    def cancelAction(self):
+        call = self._pending_confirmation_call
+        if call is None:
+            return
+        self._append_tool_result(
+            call,
+            {
                 "jsonrpc": "2.0",
                 "id": call.get("id"),
-                "method": "tools/call",
-                "params": {"name": name, "arguments": arguments},
-            })
-            self._history.append({
-                "role": "tool",
-                "tool_call_id": call.get("id", ""),
-                "content": json.dumps(result, ensure_ascii=False),
-            })
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "cancelled": True,
+                                "message": "Операция отменена пользователем.",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }],
+                },
+            },
+        )
+        self._finish_confirmation()
+        self._continue_after_confirmation()
 
     @pyqtSlot(str)
     def _on_failed(self, error):
