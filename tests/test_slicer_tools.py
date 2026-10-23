@@ -25,6 +25,36 @@ class _TranslateOperation(object):
         self.pushed = True
 
 
+class _Signal(object):
+    def __init__(self):
+        self.handlers = []
+
+    def connect(self, handler):
+        self.handlers.append(handler)
+
+    def emit(self, *args):
+        for handler in self.handlers:
+            handler(*args)
+
+
+class _Backend(object):
+    def __init__(self, plugin_id="mock-backend"):
+        self.plugin_id = plugin_id
+        self.backendStateChange = _Signal()
+        self.processingProgress = _Signal()
+
+    def getPluginId(self):
+        return self.plugin_id
+
+
+class _BackendManager(object):
+    def __init__(self, backend):
+        self.backend = backend
+
+    def getCurrentBackend(self):
+        return self.backend
+
+
 class _Node(object):
     def __init__(self, object_id, mesh=True):
         self.object_id = object_id
@@ -59,11 +89,15 @@ class _Controller(object):
 
 
 class _Application(object):
-    def __init__(self, scene):
+    def __init__(self, scene, backend=None):
         self.controller = _Controller(scene)
+        self.backend_manager = _BackendManager(backend) if backend else None
 
     def getController(self):
         return self.controller
+
+    def getBackendManager(self):
+        return self.backend_manager
 
 
 def _install_uranium_mocks():
@@ -144,6 +178,22 @@ class SlicerToolsTests(unittest.TestCase):
                 }
             )
         self.assertEqual(_TranslateOperation.instances, [])
+
+    def test_backend_status_tracks_confirmed_signals(self):
+        backend = _Backend()
+        tools = SlicerTools(_Application(_Scene([]), backend=backend))
+
+        before_signal = tools.get_backend_status({})
+        self.assertEqual(before_signal["backend"], "mock-backend")
+        self.assertFalse(before_signal["state_known"])
+        self.assertIsNone(before_signal["state"])
+
+        backend.backendStateChange.emit(2)
+        backend.processingProgress.emit(0.35)
+        status = tools.get_backend_status({})
+        self.assertTrue(status["state_known"])
+        self.assertEqual(status["state"], "Processing")
+        self.assertEqual(status["progress"], 0.35)
 
 
 if __name__ == "__main__":

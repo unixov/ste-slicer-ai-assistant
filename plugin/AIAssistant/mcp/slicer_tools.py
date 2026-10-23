@@ -10,6 +10,9 @@ class SlicerTools(object):
     def __init__(self, application, dispatch=None):
         self._application = application
         self._dispatch = dispatch or (lambda callback: callback())
+        self._observed_backend = None
+        self._backend_state = None
+        self._backend_progress = None
 
     def list_scene_objects(self, arguments):
         return self._dispatch(self._list_scene_objects)
@@ -101,6 +104,72 @@ class SlicerTools(object):
                 "coordinate_system": "world",
             }
         raise ValueError("Mesh object not found: " + str(object_id))
+
+    def get_backend_status(self, arguments):
+        return self._dispatch(self._get_backend_status)
+
+    def _get_backend_status(self):
+        get_backend_manager = getattr(self._application, "getBackendManager", None)
+        if not callable(get_backend_manager):
+            return {"available": False, "message": "Backend manager is unavailable."}
+
+        manager = get_backend_manager()
+        backend = manager.getCurrentBackend() if manager is not None else None
+        if backend is None:
+            return {"available": False, "message": "No active slicing backend."}
+
+        self._observe_backend(backend)
+        get_plugin_id = getattr(backend, "getPluginId", None)
+        backend_id = get_plugin_id() if callable(get_plugin_id) else None
+        result = {
+            "available": True,
+            "backend": backend_id,
+            "state": self._state_name(self._backend_state),
+            "progress": self._backend_progress,
+        }
+        if self._backend_state is None:
+            result["state_known"] = False
+            result["message"] = "Backend state has not emitted a signal yet."
+        else:
+            result["state_known"] = True
+        return result
+
+    def _observe_backend(self, backend):
+        if backend is self._observed_backend:
+            return
+        self._observed_backend = backend
+        self._backend_state = None
+        self._backend_progress = None
+        state_signal = getattr(backend, "backendStateChange", None)
+        if state_signal is not None and hasattr(state_signal, "connect"):
+            state_signal.connect(self._on_backend_state_change)
+        progress_signal = getattr(backend, "processingProgress", None)
+        if progress_signal is not None and hasattr(progress_signal, "connect"):
+            progress_signal.connect(self._on_backend_progress)
+
+    def _on_backend_state_change(self, state):
+        self._backend_state = state
+
+    def _on_backend_progress(self, progress):
+        try:
+            self._backend_progress = float(progress)
+        except (TypeError, ValueError):
+            self._backend_progress = None
+
+    @staticmethod
+    def _state_name(state):
+        if state is None:
+            return None
+        name = getattr(state, "name", None)
+        if name:
+            return name
+        return {
+            1: "NotStarted",
+            2: "Processing",
+            3: "Done",
+            4: "Error",
+            5: "Disabled",
+        }.get(state, str(state))
 
     def get_settings(self, arguments):
         return self._dispatch(self._get_settings)

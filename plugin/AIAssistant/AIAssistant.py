@@ -146,6 +146,12 @@ class AssistantBridge(QObject):
             self._slicer_tools.get_settings,
         )
         registry.register(
+            "backend.get_status",
+            "Read the active slicing backend and its last observed state.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_backend_status,
+        )
+        registry.register(
             "scene.get_selection",
             "List mesh objects currently selected in STE Slicer.",
             {"type": "object", "properties": {}, "additionalProperties": False},
@@ -211,11 +217,15 @@ class AssistantBridge(QObject):
         selection = self._mcp_server.handle(
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "scene.get_selection"}}
         )
+        backend = self._mcp_server.handle(
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "backend.get_status"}}
+        )
         return "Текущее состояние STE Slicer:\n" + json.dumps(
             {
                 "objects": objects,
                 "selection": selection,
                 "settings": settings,
+                "backend": backend,
             },
             ensure_ascii=False,
         )
