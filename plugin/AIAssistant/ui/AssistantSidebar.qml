@@ -31,7 +31,14 @@ Rectangle {
 
     Connections {
         target: aiAssistantBridge
-        onReplyReady: addAssistantMessage(reply)
+        onReplyReady: {
+            addAssistantMessage(reply)
+            messageList.positionViewAtEnd()
+        }
+        onRequestFailed: {
+            addAssistantMessage("Ошибка: " + error)
+            messageList.positionViewAtEnd()
+        }
     }
 
     ColumnLayout {
