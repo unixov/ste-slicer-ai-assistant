@@ -42,9 +42,13 @@ class _Backend(object):
         self.plugin_id = plugin_id
         self.backendStateChange = _Signal()
         self.processingProgress = _Signal()
+        self.force_slice_calls = 0
 
     def getPluginId(self):
         return self.plugin_id
+
+    def forceSlice(self):
+        self.force_slice_calls += 1
 
 
 class _BackendManager(object):
@@ -194,6 +198,17 @@ class SlicerToolsTests(unittest.TestCase):
         self.assertTrue(status["state_known"])
         self.assertEqual(status["state"], "Processing")
         self.assertEqual(status["progress"], 0.35)
+
+    def test_start_slicing_calls_active_backend(self):
+        backend = _Backend()
+        tools = SlicerTools(_Application(_Scene([]), backend=backend))
+
+        result = tools.start_slicing({})
+
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["asynchronous"])
+        self.assertEqual(result["backend"], "mock-backend")
+        self.assertEqual(backend.force_slice_calls, 1)
 
 
 if __name__ == "__main__":

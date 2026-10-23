@@ -152,6 +152,13 @@ class AssistantBridge(QObject):
             self._slicer_tools.get_backend_status,
         )
         registry.register(
+            "backend.start_slicing",
+            "Start asynchronous re-slicing with the active STE Slicer backend.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.start_slicing,
+            requires_confirmation=True,
+        )
+        registry.register(
             "scene.get_selection",
             "List mesh objects currently selected in STE Slicer.",
             {"type": "object", "properties": {}, "additionalProperties": False},

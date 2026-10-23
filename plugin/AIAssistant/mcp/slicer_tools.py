@@ -105,6 +105,31 @@ class SlicerTools(object):
             }
         raise ValueError("Mesh object not found: " + str(object_id))
 
+    def start_slicing(self, arguments):
+        return self._dispatch(self._start_slicing)
+
+    def _start_slicing(self):
+        get_backend_manager = getattr(self._application, "getBackendManager", None)
+        if not callable(get_backend_manager):
+            raise RuntimeError("Backend manager is unavailable.")
+        manager = get_backend_manager()
+        backend = manager.getCurrentBackend() if manager is not None else None
+        if backend is None:
+            raise RuntimeError("No active slicing backend.")
+        force_slice = getattr(backend, "forceSlice", None)
+        if not callable(force_slice):
+            raise RuntimeError("Active backend does not support forceSlice().")
+
+        self._observe_backend(backend)
+        force_slice()
+        get_plugin_id = getattr(backend, "getPluginId", None)
+        return {
+            "accepted": True,
+            "backend": get_plugin_id() if callable(get_plugin_id) else None,
+            "message": "Переслайсинг запущен штатным backend STE Slicer.",
+            "asynchronous": True,
+        }
+
     def get_backend_status(self, arguments):
         return self._dispatch(self._get_backend_status)
 
