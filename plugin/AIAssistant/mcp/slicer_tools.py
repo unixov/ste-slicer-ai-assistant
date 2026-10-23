@@ -1,4 +1,5 @@
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
+from UM.Scene.Selection import Selection
 
 
 class SlicerTools(object):
@@ -13,23 +14,41 @@ class SlicerTools(object):
         scene = self._application.getController().getScene()
         objects = []
         for node in DepthFirstIterator(scene.getRoot()):
-            mesh = node.getMeshData()
-            if mesh is None:
-                continue
-            box = node.getBoundingBox()
-            item = {
-                "id": node.getId(),
-                "name": node.getName(),
-                "file": mesh.getFileName() or "",
-            }
-            if box is not None:
-                item["bounds"] = {
-                    "width": box.width,
-                    "height": box.height,
-                    "depth": box.depth,
-                }
-            objects.append(item)
+            item = self._describe_mesh_node(node)
+            if item is not None:
+                objects.append(item)
         return {"objects": objects}
+
+    def get_selection(self, arguments):
+        return self._dispatch(self._get_selection)
+
+    def _get_selection(self):
+        objects = []
+        for node in Selection.getAllSelectedObjects():
+            item = self._describe_mesh_node(node)
+            if item is not None:
+                objects.append(item)
+        return {"objects": objects}
+
+    @staticmethod
+    def _describe_mesh_node(node):
+        mesh = node.getMeshData()
+        if mesh is None:
+            return None
+
+        box = node.getBoundingBox()
+        item = {
+            "id": node.getId(),
+            "name": node.getName(),
+            "file": mesh.getFileName() or "",
+        }
+        if box is not None:
+            item["bounds"] = {
+                "width": box.width,
+                "height": box.height,
+                "depth": box.depth,
+            }
+        return item
 
     def get_settings(self, arguments):
         return self._dispatch(self._get_settings)

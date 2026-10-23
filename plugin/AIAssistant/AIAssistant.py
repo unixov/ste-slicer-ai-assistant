@@ -137,6 +137,12 @@ class AssistantBridge(QObject):
             self._slicer_tools.get_settings,
         )
         registry.register(
+            "scene.get_selection",
+            "List mesh objects currently selected in STE Slicer.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_selection,
+        )
+        registry.register(
             "scene.arrange_all",
             "Arrange models on the active build plate.",
             {"type": "object", "properties": {}, "additionalProperties": False},
@@ -169,8 +175,16 @@ class AssistantBridge(QObject):
         settings = self._mcp_server.handle(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "settings.get"}}
         )
+        selection = self._mcp_server.handle(
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "scene.get_selection"}}
+        )
         return "Текущее состояние STE Slicer:\n" + json.dumps(
-            {"objects": objects, "settings": settings}, ensure_ascii=False
+            {
+                "objects": objects,
+                "selection": selection,
+                "settings": settings,
+            },
+            ensure_ascii=False,
         )
 
     @pyqtProperty(str, notify=statusChanged)

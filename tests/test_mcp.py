@@ -25,6 +25,12 @@ class McpTests(unittest.TestCase):
             lambda arguments: {"written": arguments["value"]},
             requires_confirmation=True,
         )
+        self.registry.register(
+            "read.selection",
+            "Read the current selection.",
+            {"type": "object", "properties": {}},
+            lambda arguments: {"objects": ["part-1"]},
+        )
         self.server = McpServer(self.registry)
 
     def test_initialize(self):
@@ -37,7 +43,7 @@ class McpTests(unittest.TestCase):
         response = self.server.handle(
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
         )
-        self.assertEqual(len(response["result"]["tools"]), 2)
+        self.assertEqual(len(response["result"]["tools"]), 3)
 
     def test_read_tool(self):
         response = self.server.handle(
@@ -63,9 +69,21 @@ class McpTests(unittest.TestCase):
         data = json.loads(response["result"]["content"][0]["text"])
         self.assertTrue(data["requires_confirmation"])
 
+    def test_selection_tool(self):
+        response = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "read.selection"},
+            }
+        )
+        data = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(data["objects"], ["part-1"])
+
     def test_invalid_method(self):
         response = self.server.handle(
-            {"jsonrpc": "2.0", "id": 5, "method": "unknown"}
+            {"jsonrpc": "2.0", "id": 6, "method": "unknown"}
         )
         self.assertEqual(response["error"]["code"], -32601)
 

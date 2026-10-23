@@ -80,6 +80,7 @@ STE_SLICER_AI_MODEL=dashscope/qwen3.8-flash
 Внутри плагина реализован минимальный JSON-RPC 2.0 слой с методами `initialize`, `tools/list` и `tools/call`. Сейчас зарегистрированы:
 
 - `scene.list_objects` — список загруженных mesh-объектов и их габаритов;
+- `scene.get_selection` — текущий выбор пользователя в 3D-сцене;
 - `settings.get` — активная машина и основные параметры печати;
 - `scene.arrange_all` — авторасстановка объектов на столе; требует подтверждения пользователя.
 
