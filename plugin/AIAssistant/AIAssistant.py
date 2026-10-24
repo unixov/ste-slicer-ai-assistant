@@ -32,31 +32,32 @@ _SYSTEM_PROMPT_BASE = """\
 Язык: ТОЛЬКО русский. БЕЗ Markdown-символов (* # ` | и т.д.). \
 Пиши как живой человек — просто, понятно, дружелюбно.
 
-АВТОМАТИЧЕСКИЙ АЛГОРИТМ — выполняй ВСЕ шаги для каждой загруженной модели:
-1. Вызови scene.list_objects — получи список моделей и их ID.
-2. Для первого объекта вызови scene.recommend_print_mode — \
-   получишь режим (3D/5D), материал, размеры, вес и объяснение для новичка.
-3. Вызови scene.get_structural_analysis — получишь зоны напряжений \
-   и оптимальные настройки (поле recommended_settings).
-4. Вызови settings.apply_print_profile с параметрами из шага 2 и 3:
-   - material из рекомендации шага 2
-   - mode из рекомендации шага 2
-   - infill_sparse_density и wall_line_count из recommended_settings шага 3
+ПОЛНЫЙ АВТОМАТИЧЕСКИЙ АЛГОРИТМ — выполняй ВСЕ 5 шагов без остановок:
+1. Вызови scene.list_objects — получи ID объекта.
+2. Вызови scene.recommend_print_mode — получи режим (3D/5D), материал, вес.
+3. Вызови scene.get_structural_analysis — получи зоны напряжений и recommended_settings.
+4. Вызови settings.apply_print_profile с этими параметрами:
+   - material и mode из шага 2
+   - infill = infill_sparse_density из recommended_settings шага 3
+   - wall_line_count из recommended_settings шага 3
    - layer_height из recommended_settings шага 3
-5. Дай ответ пользователю — простыми словами объясни что нашёл и что сделал.
+5. Вызови backend.start_slicing — запусти слайсинг автоматически.
+6. Дай финальный ответ: что нашёл, что настроил, что слайсинг запущен.
 
-ПРАВИЛА:
-- settings.apply и settings.apply_print_profile НЕ требуют подтверждения.
-- Не вызывай один инструмент дважды.
-- Если список объектов пуст — скажи "Загрузите модель, и я всё настрою автоматически."
+ПРАВИЛА (не нарушай):
+- settings.apply, settings.apply_print_profile и backend.start_slicing выполняются БЕЗ подтверждения.
+- Не вызывай один инструмент дважды за один диалог.
+- Не останавливайся между шагами — выполняй всю цепочку за одно обращение к LLM.
+- Если объектов нет — напиши "Загрузите модель, и я всё настрою и запущу автоматически."
 - Всегда указывай конкретные числа: температуру, скорость, % заполнения.
 
-СТИЛЬ ОТВЕТА ДЛЯ НОВИЧКА:
-- Начни с размеров и веса детали (понятно и конкретно).
-- Объясни ЗАЧЕМ выбран именно такой режим (3D или 5D) — без жаргона.
-- Скажи какой материал и почему именно он.
-- Перечисли главные настройки и что они дают на практике.
-- Закончи фразой о том, сколько это займёт / сэкономит.
+СТИЛЬ ФИНАЛЬНОГО ОТВЕТА (после слайсинга):
+- Начни: "Готово! Вот что я сделал:"
+- Размеры и примерный вес детали.
+- Режим печати (3D или 5D) и ЗАЧЕМ — одним предложением.
+- Материал и температура.
+- Заполнение % и число стенок — с пояснением "это значит...".
+- Последняя строка: "Слайсинг запущен — можете нажать кнопку Печать."
 """
 
 
@@ -392,7 +393,6 @@ class AssistantBridge(QObject):
             "Start asynchronous re-slicing with the active STE Slicer backend.",
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.start_slicing,
-            requires_confirmation=True,
         )
 
         # ---- export tools ----
@@ -522,6 +522,22 @@ class AssistantBridge(QObject):
     # Message flow                                                         #
     # ------------------------------------------------------------------ #
 
+    @pyqtSlot()
+    def triggerFullSetup(self):
+        """
+        One-click full setup: analyse → apply settings → start slicing.
+        Called from the big "Настроить и начать" button in QML.
+        """
+        if self.busy:
+            return
+        prompt = (
+            "Выполни полную автоматическую настройку и запусти слайсинг: "
+            "определи режим печати (3D или 5D), подбери материал, "
+            "выполни структурный анализ, примени все настройки и запусти слайсинг. "
+            "Объясни что сделал простыми словами."
+        )
+        self.sendMessage(prompt)
+
     @pyqtSlot(str)
     def sendMessage(self, text):
         text = (text or "").strip()
@@ -543,7 +559,7 @@ class AssistantBridge(QObject):
         self._start_llm_request()
 
     def _start_llm_request(self):
-        force_text = self._tool_rounds >= 2
+        force_text = self._tool_rounds >= 6
         self._thread = QThread(self)
         self._worker = LlmWorker(
             list(self._history),
@@ -569,7 +585,7 @@ class AssistantBridge(QObject):
             len(tool_calls or []),
         )
         if tool_calls:
-            if self._tool_rounds >= 4:
+            if self._tool_rounds >= 8:
                 self._set_status("Слишком много последовательных действий")
                 self._last_error = "Остановлено: превышен лимит вызовов инструментов."
                 self.lastErrorChanged.emit()

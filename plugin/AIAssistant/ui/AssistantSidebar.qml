@@ -579,6 +579,42 @@ Rectangle {
         }
 
         // ============================================================== //
+        // BIG ONE-CLICK BUTTON
+        // ============================================================== //
+        Button {
+            Layout.fillWidth: true
+            enabled: aiAssistantBridge ? !aiAssistantBridge.busy : false
+            text:    aiAssistantBridge && aiAssistantBridge.busy
+                     ? "Идёт настройка..."
+                     : "Настроить и начать слайсинг"
+            height:  44
+
+            background: Rectangle {
+                color:  (parent.enabled && !parent.pressed)
+                        ? (aiAssistantBridge && aiAssistantBridge.busy ? "#7f8c8d" : "#27ae60")
+                        : "#1e8449"
+                radius: 5
+                Behavior on color { ColorAnimation { duration: 150 } }
+            }
+
+            contentItem: Label {
+                text:              parent.text
+                color:             "white"
+                font.bold:         true
+                font.pixelSize:    14
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment:   Text.AlignVCenter
+            }
+
+            onClicked: {
+                if (!aiAssistantBridge || aiAssistantBridge.busy) return
+                addUserMessage("Настроить и начать слайсинг автоматически")
+                aiAssistantBridge.triggerFullSetup()
+                messageList.positionViewAtEnd()
+            }
+        }
+
+        // ============================================================== //
         // QUICK ACTION PRESETS
         // ============================================================== //
         RowLayout {
@@ -587,7 +623,6 @@ Rectangle {
             opacity: (aiAssistantBridge && !aiAssistantBridge.busy) ? 1.0 : 0.4
             Behavior on opacity { NumberAnimation { duration: 200 } }
 
-            // "Прочность" button
             Button {
                 Layout.fillWidth: true
                 text:    "Прочность"
@@ -595,14 +630,13 @@ Rectangle {
                 font:    UM.Theme.getFont("small")
                 onClicked: {
                     if (!aiAssistantBridge || aiAssistantBridge.busy) return
-                    var msg = "Выполни структурный анализ первого объекта сцены и предложи оптимальную ориентацию и адаптивное заполнение для максимальной прочности при минимальном расходе пластика."
+                    var msg = "Выполни структурный анализ первого объекта и предложи оптимальные настройки для максимальной прочности."
                     addUserMessage(msg)
                     aiAssistantBridge.sendMessage(msg)
                     messageList.positionViewAtEnd()
                 }
             }
 
-            // "Настройки" button
             Button {
                 Layout.fillWidth: true
                 text:    "Настройки"
@@ -610,14 +644,13 @@ Rectangle {
                 font:    UM.Theme.getFont("small")
                 onClicked: {
                     if (!aiAssistantBridge || aiAssistantBridge.busy) return
-                    var msg = "Прочитай текущие настройки и состояние сцены. Предложи конкретные улучшения для качества и скорости печати."
+                    var msg = "Прочитай текущие настройки и предложи улучшения для качества и скорости печати."
                     addUserMessage(msg)
                     aiAssistantBridge.sendMessage(msg)
                     messageList.positionViewAtEnd()
                 }
             }
 
-            // "Слайсинг" button
             Button {
                 Layout.fillWidth: true
                 text:    "Слайсинг"
