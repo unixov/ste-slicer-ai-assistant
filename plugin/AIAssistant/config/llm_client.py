@@ -46,7 +46,7 @@ def _format_http_error(error):
     return message
 
 
-def complete(messages, tools=None, timeout=60):
+def complete(messages, tools=None, timeout=60, force_text=False):
     api_key = get_api_key()
     if not api_key:
         raise LlmError("API-ключ не задан. Установите STE_SLICER_AI_API_KEY в окружении STE Slicer.")
@@ -56,8 +56,12 @@ def complete(messages, tools=None, timeout=60):
         "messages": messages,
         "temperature": 0.2,
     }
-    if tools:
+    if tools and not force_text:
         payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    elif tools and force_text:
+        # Don't send tools at all — forces a plain text response
+        pass
     body = json.dumps(payload).encode("utf-8")
     request = Request(
         get_base_url() + "/chat/completions",

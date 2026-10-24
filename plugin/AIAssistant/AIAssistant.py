@@ -36,15 +36,20 @@ class LlmWorker(QObject):
     finished = pyqtSignal(str, object)
     failed = pyqtSignal(str)
 
-    def __init__(self, messages, tools=None, parent=None):
+    def __init__(self, messages, tools=None, force_text=False, parent=None):
         super().__init__(parent)
         self._messages = messages
         self._tools = tools or []
+        self._force_text = force_text
 
     @pyqtSlot()
     def run(self):
         try:
-            content, tool_calls = complete(self._messages, tools=self._tools)
+            content, tool_calls = complete(
+                self._messages,
+                tools=self._tools,
+                force_text=self._force_text,
+            )
             self.finished.emit(content, tool_calls)
         except LlmError as error:
             self.failed.emit(str(error))
@@ -54,26 +59,39 @@ class LlmWorker(QObject):
 
 class AssistantBridge(QObject):
     messageReceived = pyqtSignal(str)
-    replyReady = pyqtSignal(str)
+    replyReady = pyqtSignal()
     requestStarted = pyqtSignal()
-    requestFailed = pyqtSignal(str)
+    requestFailed = pyqtSignal()
     statusChanged = pyqtSignal()
     requestStateChanged = pyqtSignal()
     confirmationChanged = pyqtSignal()
+    lastReplyChanged = pyqtSignal()
+    lastErrorChanged = pyqtSignal()
+    modelLoadedSignal = pyqtSignal()
     _main_thread_request = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._status = "Готов к работе"
+        self._last_reply = ""
+        self._last_error = ""
+        self._known_mesh_ids = set()
+        self._pending_auto_analysis = False
         self._history = [
             {
                 "role": "system",
                 "content": (
-                    "Ты ассистент по настройке печати в STE Slicer. "
-                    "Не утверждай, что изменил сцену или выполнил расчёт, "
-                    "если это не подтверждено результатом инструмента. "
-                    "Изменяющие сцену действия выполняются только после явного "
-                    "подтверждения пользователя в панели ассистента."
+                    "Ты ассистент по настройке 3D-печати в STE Slicer. "
+                    "Отвечай ТОЛЬКО на русском языке. "
+                    "Правила работы с инструментами:\n"
+                    "1. Вызывай каждый инструмент не более одного раза за диалог.\n"
+                    "2. После получения результатов инструментов ОБЯЗАТЕЛЬНО дай "
+                    "текстовый ответ пользователю — не вызывай инструменты снова.\n"
+                    "3. Если данные уже получены, используй их для ответа.\n"
+                    "4. Не утверждай, что изменил сцену, если это не подтверждено "
+                    "результатом инструмента.\n"
+                    "5. Изменяющие сцену действия выполняются только после явного "
+                    "подтверждения пользователя."
                 ),
             }
         ]
@@ -93,6 +111,10 @@ class AssistantBridge(QObject):
         self._confirmation_arguments = ""
         self._tool_rounds = 0
 
+    # ------------------------------------------------------------------ #
+    # Main-thread dispatcher (for tool calls from worker thread)           #
+    # ------------------------------------------------------------------ #
+
     def _dispatch_slicer_callback(self, callback):
         if QThread.currentThread() == self.thread():
             return callback()
@@ -108,8 +130,7 @@ class AssistantBridge(QObject):
                             "Тайм-аут: операция отменена до запуска."
                         )
                     raise RuntimeError(
-                        "Тайм-аут: операция уже выполняется; результат неизвестен. "
-                        "Не повторяйте её автоматически."
+                        "Тайм-аут: операция уже выполняется; результат неизвестен."
                     )
         if request.error is not None:
             raise request.error
@@ -129,6 +150,10 @@ class AssistantBridge(QObject):
         finally:
             request.event.set()
 
+    # ------------------------------------------------------------------ #
+    # MCP / tool registration                                              #
+    # ------------------------------------------------------------------ #
+
     def configure_mcp(self, application):
         self._slicer_tools = SlicerTools(
             application,
@@ -137,55 +162,29 @@ class AssistantBridge(QObject):
         registry = ToolRegistry()
         registry.register(
             "scene.list_objects",
-            "List mesh objects currently loaded in STE Slicer.",
+            "List mesh objects currently loaded in STE Slicer with geometry info.",
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.list_scene_objects,
         )
         registry.register(
-            "settings.get",
-            "Read selected print settings and the active machine.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            self._slicer_tools.get_settings,
-        )
-        registry.register(
-            "backend.get_status",
-            "Read the active slicing backend and its last observed state.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            self._slicer_tools.get_backend_status,
-        )
-        registry.register(
-            "backend.start_slicing",
-            "Start asynchronous re-slicing with the active STE Slicer backend.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            self._slicer_tools.start_slicing,
-            requires_confirmation=True,
+            "scene.analyse_object",
+            "Analyse the geometry of a specific mesh object: vertex/face count, "
+            "bounding box, aspect ratios and print warnings.",
+            {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": ["string", "number"]},
+                },
+                "required": ["object_id"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.analyse_object,
         )
         registry.register(
             "scene.get_selection",
             "List mesh objects currently selected in STE Slicer.",
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.get_selection,
-        )
-        registry.register(
-            "export.scene",
-            "Export the current mesh scene to a new .gcode or .3mf file at an explicit path.",
-            {
-                "type": "object",
-                "properties": {
-                    "file_name": {"type": "string"},
-                    "file_format": {"type": "string", "enum": ["gcode", "3mf"]},
-                },
-                "required": ["file_name", "file_format"],
-                "additionalProperties": False,
-            },
-            self._slicer_tools.export_scene,
-            requires_confirmation=True,
-        )
-        registry.register(
-            "export.get_status",
-            "Read the asynchronous status of the latest scene export.",
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            self._slicer_tools.get_export_status,
         )
         registry.register(
             "scene.arrange_all",
@@ -218,6 +217,46 @@ class AssistantBridge(QObject):
             self._slicer_tools.move_object,
             requires_confirmation=True,
         )
+        registry.register(
+            "settings.get",
+            "Read selected print settings and the active machine.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_settings,
+        )
+        registry.register(
+            "backend.get_status",
+            "Read the active slicing backend and its last observed state.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_backend_status,
+        )
+        registry.register(
+            "backend.start_slicing",
+            "Start asynchronous re-slicing with the active STE Slicer backend.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.start_slicing,
+            requires_confirmation=True,
+        )
+        registry.register(
+            "export.scene",
+            "Export the current mesh scene to a new .gcode or .3mf file at an explicit path.",
+            {
+                "type": "object",
+                "properties": {
+                    "file_name": {"type": "string"},
+                    "file_format": {"type": "string", "enum": ["gcode", "3mf"]},
+                },
+                "required": ["file_name", "file_format"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.export_scene,
+            requires_confirmation=True,
+        )
+        registry.register(
+            "export.get_status",
+            "Read the asynchronous status of the latest scene export.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            self._slicer_tools.get_export_status,
+        )
         self._mcp_server = McpServer(registry)
 
     def _openai_tools(self):
@@ -235,34 +274,59 @@ class AssistantBridge(QObject):
             })
         return tools
 
+    def _extract_tool_result(self, mcp_response):
+        """Extract the plain Python object from an MCP tool response."""
+        try:
+            text = mcp_response["result"]["content"][0]["text"]
+            return json.loads(text)
+        except Exception:
+            return mcp_response
+
     def _scene_context(self):
+        """Build a clean scene context string for the system prompt."""
         if self._mcp_server is None:
             return "Состояние слайсера пока недоступно."
-        objects = self._mcp_server.handle(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "scene.list_objects"}}
-        )
-        settings = self._mcp_server.handle(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "settings.get"}}
-        )
-        selection = self._mcp_server.handle(
-            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "scene.get_selection"}}
-        )
-        backend = self._mcp_server.handle(
-            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "backend.get_status"}}
-        )
-        return "Текущее состояние STE Slicer:\n" + json.dumps(
-            {
-                "objects": objects,
-                "selection": selection,
-                "settings": settings,
-                "backend": backend,
-            },
-            ensure_ascii=False,
-        )
+        try:
+            objects = self._extract_tool_result(self._mcp_server.handle(
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                 "params": {"name": "scene.list_objects"}}
+            ))
+            settings = self._extract_tool_result(self._mcp_server.handle(
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "settings.get"}}
+            ))
+            backend = self._extract_tool_result(self._mcp_server.handle(
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                 "params": {"name": "backend.get_status"}}
+            ))
+            return "Текущее состояние STE Slicer:\n" + json.dumps(
+                {
+                    "objects": objects,
+                    "settings": settings,
+                    "backend": backend,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        except Exception as exc:
+            Logger.log("w", "AI Assistant: _scene_context failed: %s", exc)
+            return "Состояние слайсера временно недоступно."
+
+    # ------------------------------------------------------------------ #
+    # Qt properties                                                        #
+    # ------------------------------------------------------------------ #
 
     @pyqtProperty(str, notify=statusChanged)
     def status(self):
         return self._status
+
+    @pyqtProperty(str, notify=lastReplyChanged)
+    def lastReply(self):
+        return self._last_reply
+
+    @pyqtProperty(str, notify=lastErrorChanged)
+    def lastError(self):
+        return self._last_error
 
     @pyqtProperty(bool, notify=requestStateChanged)
     def busy(self):
@@ -284,19 +348,34 @@ class AssistantBridge(QObject):
         self._status = value
         self.statusChanged.emit()
 
+    # ------------------------------------------------------------------ #
+    # Message flow                                                         #
+    # ------------------------------------------------------------------ #
+
     @pyqtSlot(str)
     def sendMessage(self, text):
         text = (text or "").strip()
-        if not text or self.busy:
+        if not text:
+            return
+        if self.busy:
+            # Queue auto-analysis if it was triggered while busy
+            Logger.log("d", "AI Assistant: sendMessage skipped (busy): %s", text[:60])
             return
 
         self._history.append({"role": "user", "content": text})
+        # Refresh system prompt with current scene state each time
         self._history[0]["content"] = (
-            "Ты ассистент по настройке печати в STE Slicer. "
-            "Не утверждай, что изменил сцену или выполнил расчёт прочности, "
-            "если это не подтверждено результатом инструмента. "
-            "Изменяющие сцену действия выполняются только после явного "
-            "подтверждения пользователя в панели ассистента.\n\n"
+            "Ты ассистент по настройке 3D-печати в STE Slicer. "
+            "Отвечай ТОЛЬКО на русском языке. "
+            "Правила работы с инструментами:\n"
+            "1. Вызывай каждый инструмент не более одного раза за диалог.\n"
+            "2. После получения результатов инструментов ОБЯЗАТЕЛЬНО дай "
+            "текстовый ответ пользователю — не вызывай инструменты снова.\n"
+            "3. Если данные уже получены, используй их для ответа.\n"
+            "4. Не утверждай, что изменил сцену, если это не подтверждено "
+            "результатом инструмента.\n"
+            "5. Изменяющие сцену действия выполняются только после явного "
+            "подтверждения пользователя.\n\n"
             + self._scene_context()
         )
         self.messageReceived.emit(text)
@@ -306,8 +385,14 @@ class AssistantBridge(QObject):
         self._start_llm_request()
 
     def _start_llm_request(self):
+        # After 2 tool rounds, stop sending tools to force a text response
+        force_text = self._tool_rounds >= 2
         self._thread = QThread(self)
-        self._worker = LlmWorker(list(self._history), self._openai_tools())
+        self._worker = LlmWorker(
+            list(self._history),
+            self._openai_tools(),
+            force_text=force_text,
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_finished)
@@ -329,13 +414,17 @@ class AssistantBridge(QObject):
         if tool_calls:
             if self._tool_rounds >= 4:
                 self._set_status("Слишком много последовательных действий")
-                self.requestFailed.emit(
-                    "Остановлено: превышен лимит последовательных вызовов инструментов."
-                )
+                self._last_error = "Остановлено: превышен лимит вызовов инструментов."
+                self.lastErrorChanged.emit()
+                self.requestFailed.emit()
                 self._thread.quit()
                 return
             self._tool_rounds += 1
-            assistant_message = {"role": "assistant", "content": reply or None, "tool_calls": tool_calls}
+            assistant_message = {
+                "role": "assistant",
+                "content": reply or None,
+                "tool_calls": tool_calls,
+            }
             self._history.append(assistant_message)
             self._pending_tool_calls = list(tool_calls)
             if self._execute_pending_tool_calls():
@@ -352,7 +441,13 @@ class AssistantBridge(QObject):
         self._history.append({"role": "assistant", "content": display_reply})
         self._thread.quit()
         self._set_status("Готов к работе")
-        self.replyReady.emit(display_reply)
+        self._last_reply = display_reply
+        self.lastReplyChanged.emit()
+        self.replyReady.emit()
+
+    # ------------------------------------------------------------------ #
+    # Tool call helpers                                                    #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _parse_tool_arguments(call):
@@ -478,7 +573,9 @@ class AssistantBridge(QObject):
         safe_error = str(error).strip() or "неизвестная ошибка"
         self._set_status("Ошибка запроса: " + safe_error)
         Logger.log("e", "AI Assistant: LLM request failed: %s", safe_error)
-        self.requestFailed.emit(safe_error)
+        self._last_error = safe_error
+        self.lastErrorChanged.emit()
+        self.requestFailed.emit()
         if self._thread is not None:
             self._thread.quit()
 
@@ -493,6 +590,59 @@ class AssistantBridge(QObject):
             self._pending_tool_request = False
             self._start_llm_request()
 
+    # ------------------------------------------------------------------ #
+    # Auto-analysis on model load                                          #
+    # ------------------------------------------------------------------ #
+
+    @pyqtSlot(object)
+    def onSceneChanged(self, node=None):
+        """Called when the scene changes; auto-analyses newly added mesh objects."""
+        # Only react if the changed node actually has mesh data
+        if node is not None:
+            has_mesh = callable(getattr(node, "getMeshData", None)) and node.getMeshData() is not None
+            if not has_mesh:
+                return
+
+        if self._mcp_server is None:
+            return
+
+        try:
+            result = self._mcp_server.handle({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "tools/call",
+                "params": {"name": "scene.list_objects"},
+            })
+            objects = self._extract_tool_result(result).get("objects", [])
+
+            current_ids = set(str(o.get("id", "")) for o in objects if o.get("id"))
+            new_ids = current_ids - self._known_mesh_ids
+            self._known_mesh_ids = current_ids
+
+            if not new_ids:
+                return
+
+            new_objects = [o for o in objects if str(o.get("id", "")) in new_ids]
+            Logger.log("d", "AI Assistant: new mesh object(s) detected: %s", new_ids)
+
+            # Emit notification first so QML shows it immediately
+            self.modelLoadedSignal.emit()
+
+            if self.busy:
+                Logger.log("d", "AI Assistant: busy, skipping auto-analysis")
+                return
+
+            desc = json.dumps(new_objects, ensure_ascii=False, indent=2)
+            prompt = (
+                "Пользователь загрузил новые объекты в STE Slicer:\n" + desc + "\n\n"
+                "Проанализируй геометрию (размеры, число полигонов, предупреждения), "
+                "и предложи оптимальные настройки слайсинга для этой детали."
+            )
+            self.sendMessage(prompt)
+
+        except Exception as exc:
+            Logger.log("w", "AI Assistant: onSceneChanged error: %s", exc)
+
 
 class AssistantStage(SteSlicerStage):
     def __init__(self, parent=None):
@@ -503,8 +653,16 @@ class AssistantStage(SteSlicerStage):
             "ui",
             "AssistantSidebar.qml",
         )
-        self._bridge.configure_mcp(Application.getInstance())
-        Application.getInstance().engineCreatedSignal.connect(self._engineCreated)
+        app = Application.getInstance()
+        self._bridge.configure_mcp(app)
+        app.engineCreatedSignal.connect(self._engineCreated)
+        # Connect scene changes to auto-analysis
+        try:
+            scene = app.getController().getScene()
+            scene.sceneChanged.connect(self._bridge.onSceneChanged)
+            Logger.log("d", "AI Assistant: connected sceneChanged for auto-analysis")
+        except Exception as exc:
+            Logger.log("w", "AI Assistant: could not connect sceneChanged: %s", exc)
 
     def _engineCreated(self):
         application = Application.getInstance()

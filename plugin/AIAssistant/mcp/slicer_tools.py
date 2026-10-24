@@ -1,9 +1,12 @@
 import math
 
+from UM.Logger import Logger
 from UM.Math.Vector import Vector
 from UM.Operations.TranslateOperation import TranslateOperation
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
 from UM.Scene.Selection import Selection
+
+from .geometry import analyse_mesh
 
 
 class SlicerTools(object):
@@ -25,6 +28,7 @@ class SlicerTools(object):
             item = self._describe_mesh_node(node)
             if item is not None:
                 objects.append(item)
+        Logger.log("d", "AI Assistant: scene.list_objects found %d mesh objects", len(objects))
         return {"objects": objects}
 
     def get_selection(self, arguments):
@@ -40,22 +44,59 @@ class SlicerTools(object):
 
     @staticmethod
     def _describe_mesh_node(node):
+        # Exclude known non-user nodes by class name
+        node_class = type(node).__name__
+        if node_class in ("BuildVolume", "NozzleMesh", "ConvexHullNode",
+                          "ConvexHullDecorator", "Camera", "Platform",
+                          "TranslateToolHandle", "RotateToolHandle",
+                          "ScaleToolHandle", "SceneNode"):
+            return None
+
+        # Must have actual mesh data
         mesh = node.getMeshData()
         if mesh is None:
             return None
 
-        box = node.getBoundingBox()
+        # Get node id — fall back to Python object id if getId() returns None
+        get_id = getattr(node, "getId", None)
+        node_id = None
+        try:
+            node_id = get_id() if callable(get_id) else None
+        except Exception:
+            pass
+        if node_id is None:
+            node_id = str(id(node))
+
+        # Get name — fall back to file name or id
+        get_name = getattr(node, "getName", None)
+        node_name = ""
+        try:
+            node_name = get_name() if callable(get_name) else ""
+        except Exception:
+            pass
+        if not node_name:
+            try:
+                node_name = mesh.getFileName() or str(node_id)
+            except Exception:
+                node_name = str(node_id)
+
         item = {
-            "id": node.getId(),
-            "name": node.getName(),
+            "id": node_id,
+            "name": node_name,
             "file": mesh.getFileName() or "",
         }
-        if box is not None:
-            item["bounds"] = {
-                "width": box.width,
-                "height": box.height,
-                "depth": box.depth,
-            }
+        try:
+            geo = analyse_mesh(node)
+            if geo.get("bbox"):
+                item["bounds"] = geo["bbox"]
+            if geo.get("vertex_count"):
+                item["vertex_count"] = geo["vertex_count"]
+            if geo.get("face_count"):
+                item["face_count"] = geo["face_count"]
+            if geo.get("warnings"):
+                item["warnings"] = geo["warnings"]
+        except Exception:
+            pass
         return item
 
     def move_object(self, arguments):
@@ -104,6 +145,34 @@ class SlicerTools(object):
                 "undoable": True,
                 "coordinate_system": "world",
             }
+        raise ValueError("Mesh object not found: " + str(object_id))
+
+    def analyse_object(self, arguments):
+        arguments = arguments or {}
+        object_id = arguments.get("object_id")
+        if object_id is None:
+            raise ValueError("object_id is required")
+        return self._dispatch(lambda: self._analyse_object(object_id))
+
+    def _analyse_object(self, object_id):
+        scene = self._application.getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            get_id = getattr(node, "getId", None)
+            if not callable(get_id):
+                continue
+            try:
+                nid = get_id()
+            except Exception:
+                continue
+            if str(nid) != str(object_id):
+                continue
+            if node.getMeshData() is None:
+                raise ValueError("Object is not a mesh: " + str(object_id))
+            geo = analyse_mesh(node)
+            geo["id"] = nid
+            get_name = getattr(node, "getName", None)
+            geo["name"] = get_name() if callable(get_name) else ""
+            return geo
         raise ValueError("Mesh object not found: " + str(object_id))
 
     def export_scene(self, arguments):
