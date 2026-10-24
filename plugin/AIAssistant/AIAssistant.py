@@ -12,6 +12,7 @@ from PyQt5.QtCore import (
 )
 
 from UM.Application import Application
+from UM.Logger import Logger
 from steslicer.Stages.SteSlicerStage import SteSlicerStage
 
 from .config.llm_client import LlmError, complete
@@ -493,12 +494,32 @@ class AssistantStage(SteSlicerStage):
 
     def _engineCreated(self):
         application = Application.getInstance()
-        engine = getattr(application, "qmlEngine", None)
-        if callable(engine):
-            qml_engine = engine()
-            if qml_engine is not None:
+        qml_engine = getattr(application, "_qml_engine", None)
+        if qml_engine is None:
+            engine_getter = getattr(application, "qmlEngine", None)
+            if callable(engine_getter):
+                qml_engine = engine_getter()
+
+        if qml_engine is None:
+            Logger.log(
+                "e",
+                "AI Assistant: QML engine is unavailable; bridge was not registered.",
+            )
+        else:
+            try:
                 qml_engine.rootContext().setContextProperty(
                     "aiAssistantBridge", self._bridge
+                )
+                Logger.log(
+                    "i",
+                    "AI Assistant: bridge registered, loading sidebar from %s",
+                    self._qml_path,
+                )
+            except Exception as error:
+                Logger.log(
+                    "e",
+                    "AI Assistant: failed to register QML bridge: %s",
+                    error,
                 )
 
         self.addDisplayComponent("sidebar", self._qml_path)
