@@ -174,6 +174,7 @@ Rectangle {
             TextField {
                 id: messageInput
                 Layout.fillWidth: true
+                enabled: aiAssistantBridge ? !aiAssistantBridge.busy : false
                 placeholderText: "Например: кронштейн под нагрузку 50 кг"
                 selectByMouse: true
                 onAccepted: sendButton.clicked()
@@ -182,9 +183,10 @@ Rectangle {
             Button {
                 id: sendButton
                 text: "Отправить"
+                enabled: aiAssistantBridge ? !aiAssistantBridge.busy : false
                 onClicked: {
                     var text = messageInput.text.trim()
-                    if (!text || !aiAssistantBridge) {
+                    if (!text || !aiAssistantBridge || aiAssistantBridge.busy) {
                         return
                     }
                     addUserMessage(text)
@@ -197,9 +199,10 @@ Rectangle {
 
         Button {
             Layout.fillWidth: true
+            enabled: aiAssistantBridge ? !aiAssistantBridge.busy : false
             text: "Проанализировать текущую модель"
             onClicked: {
-                if (!aiAssistantBridge) {
+                if (!aiAssistantBridge || aiAssistantBridge.busy) {
                     return
                 }
                 addUserMessage("Проанализируй текущую модель")

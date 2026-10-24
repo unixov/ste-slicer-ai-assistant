@@ -41,18 +41,34 @@ plugin/AIAssistant/
 
 tests/
 ├── test_exporter.py
+├── test_llm_client.py
 ├── test_mcp.py
 └── test_slicer_tools.py
+
+tools/
+└── package_plugin.py
+
+WINDOWS_SMOKE_TEST.md
 ```
 
 ## Установка в STE Slicer
 
-1. Скопируйте папку `plugin/AIAssistant` в каталог пользовательских плагинов STE Slicer.
+Для воспроизводимой установки сначала соберите ZIP из корня репозитория:
+
+```text
+python tools/package_plugin.py
+```
+
+Скрипт создаёт `dist/AIAssistant.zip`. В архиве находится готовая папка `AIAssistant` без `__pycache__`, `.pyc` и скрытых файлов. Передавайте на Windows именно этот ZIP, а не содержимое каталога `plugin`.
+
+Далее:
+
+1. Распакуйте папку `AIAssistant` в каталог пользовательских плагинов STE Slicer.
 2. Запустите STE Slicer заново.
 3. В списке этапов выберите `AI Assistant`.
 4. В боковой панели появится чат.
 
-Точный каталог можно открыть через меню слайсера «Справка → Показать папку конфигурации», затем открыть подпапку `plugins`.
+Точный каталог можно открыть через меню слайсера «Справка → Показать папку конфигурации», затем открыть подпапку `plugins`. Для пошаговой проверки используйте [`WINDOWS_SMOKE_TEST.md`](WINDOWS_SMOKE_TEST.md).
 
 ## Настройка LLM
 
@@ -115,3 +131,4 @@ MCP сейчас используется как внутренний слой �
 - heatmap и adaptive infill пока не реализованы;
 - эвристический ответ LLM нельзя считать сертифицированным расчётом прочности;
 - автономные MCP-тесты не требуют PyQt5, а запуск stage и QML-панели требует штатного окружения STE Slicer.
+- локальные проверки выполняются командами `python3 -m py_compile $(find plugin tests tools -name '*.py' -print)` и `python3 -m unittest discover -s tests -v`; упаковка проверяется командой `python3 tools/package_plugin.py`.

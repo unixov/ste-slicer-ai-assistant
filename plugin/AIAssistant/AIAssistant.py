@@ -57,6 +57,7 @@ class AssistantBridge(QObject):
     requestStarted = pyqtSignal()
     requestFailed = pyqtSignal(str)
     statusChanged = pyqtSignal()
+    requestStateChanged = pyqtSignal()
     confirmationChanged = pyqtSignal()
     _main_thread_request = pyqtSignal(object)
 
@@ -262,6 +263,10 @@ class AssistantBridge(QObject):
     def status(self):
         return self._status
 
+    @pyqtProperty(bool, notify=requestStateChanged)
+    def busy(self):
+        return self._thread is not None or self._confirmation_pending
+
     @pyqtProperty(bool, notify=confirmationChanged)
     def confirmationPending(self):
         return self._confirmation_pending
@@ -281,7 +286,7 @@ class AssistantBridge(QObject):
     @pyqtSlot(str)
     def sendMessage(self, text):
         text = (text or "").strip()
-        if not text or self._thread is not None or self._confirmation_pending:
+        if not text or self.busy:
             return
 
         self._history.append({"role": "user", "content": text})
@@ -310,6 +315,7 @@ class AssistantBridge(QObject):
         self._worker.failed.connect(self._worker.deleteLater)
         self._thread.finished.connect(self._cleanup_request)
         self._thread.start()
+        self.requestStateChanged.emit()
 
     @pyqtSlot(str, object)
     def _on_finished(self, reply, tool_calls):
@@ -388,6 +394,7 @@ class AssistantBridge(QObject):
         self._confirmation_pending = True
         self._set_status("Ожидание подтверждения")
         self.confirmationChanged.emit()
+        self.requestStateChanged.emit()
 
     def _execute_pending_tool_calls(self):
         while self._pending_tool_calls:
@@ -405,6 +412,7 @@ class AssistantBridge(QObject):
         self._confirmation_tool = ""
         self._confirmation_arguments = ""
         self.confirmationChanged.emit()
+        self.requestStateChanged.emit()
 
     @pyqtSlot()
     def confirmAction(self):
@@ -465,6 +473,7 @@ class AssistantBridge(QObject):
             self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        self.requestStateChanged.emit()
         if self._pending_tool_request:
             self._pending_tool_request = False
             self._start_llm_request()
