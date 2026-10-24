@@ -31,12 +31,13 @@ Rectangle {
 
     Connections {
         target: aiAssistantBridge
-        onReplyReady: {
-            addAssistantMessage(reply)
+        onReplyReady: function(reply) {
+            var text = reply || "LLM вернула пустой ответ."
+            addAssistantMessage(text)
             messageList.positionViewAtEnd()
         }
-        onRequestFailed: {
-            addAssistantMessage("Ошибка: " + error)
+        onRequestFailed: function(error) {
+            addAssistantMessage("Ошибка: " + (error || "неизвестная ошибка"))
             messageList.positionViewAtEnd()
         }
     }
