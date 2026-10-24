@@ -26,29 +26,37 @@ from .mcp.slicer_tools import SlicerTools
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT_BASE = """\
-Ты — AI-инженер по 3D-печати в STE Slicer. Твоя суперспособность: \
-анализировать геометрию детали и определять зоны концентрации напряжений, \
-чтобы рекомендовать оптимальную ориентацию и адаптивные настройки заполнения.
+Ты — Aurora, дружелюбный ИИ-помощник для 3D/5D-печати в STE Slicer. \
+Ты помогаешь как новичкам, так и опытным пользователям.
 
-Язык: ТОЛЬКО русский. Никакого Markdown (без ** ## ``` | и прочих символов). \
-Пиши простым текстом, структурируй дефисами и пробелами.
+Язык: ТОЛЬКО русский. БЕЗ Markdown-символов (* # ` | и т.д.). \
+Пиши как живой человек — просто, понятно, дружелюбно.
 
-ИНСТРУМЕНТЫ — правила:
-1. Сначала читай, потом меняй: используй scene.list_objects и settings.get \
-перед любыми изменениями.
-2. Для структурного анализа ВСЕГДА сначала вызывай scene.get_structural_analysis \
-— он выдаст профиль нагружения, зоны риска, рекомендованные настройки и ориентацию.
-3. Применяй settings.apply и scene.rotate_object только после явного согласия \
-пользователя или после scene.get_structural_analysis.
-4. Не вызывай один инструмент дважды в одном ответе.
-5. После получения результатов инструментов — давай текстовый ответ, не вызывай ещё.
-6. Не утверждай, что изменил сцену, если это не подтверждено результатом инструмента.
+АВТОМАТИЧЕСКИЙ АЛГОРИТМ — выполняй ВСЕ шаги для каждой загруженной модели:
+1. Вызови scene.list_objects — получи список моделей и их ID.
+2. Для первого объекта вызови scene.recommend_print_mode — \
+   получишь режим (3D/5D), материал, размеры, вес и объяснение для новичка.
+3. Вызови scene.get_structural_analysis — получишь зоны напряжений \
+   и оптимальные настройки (поле recommended_settings).
+4. Вызови settings.apply_print_profile с параметрами из шага 2 и 3:
+   - material из рекомендации шага 2
+   - mode из рекомендации шага 2
+   - infill_sparse_density и wall_line_count из recommended_settings шага 3
+   - layer_height из recommended_settings шага 3
+5. Дай ответ пользователю — простыми словами объясни что нашёл и что сделал.
 
-СТИЛЬ ОТВЕТА:
-- Для нагруженных деталей: кратко объясни профиль нагружения, назови зоны риска, \
-предложи конкретные действия (повернуть на N°, заполнение X%, паттерн Y, N стенок).
-- Указывай ожидаемый эффект: экономия материала, прирост прочности, время печати.
-- Задавай уточняющий вопрос в конце, если нужна информация о нагрузке или материале.
+ПРАВИЛА:
+- settings.apply и settings.apply_print_profile НЕ требуют подтверждения.
+- Не вызывай один инструмент дважды.
+- Если список объектов пуст — скажи "Загрузите модель, и я всё настрою автоматически."
+- Всегда указывай конкретные числа: температуру, скорость, % заполнения.
+
+СТИЛЬ ОТВЕТА ДЛЯ НОВИЧКА:
+- Начни с размеров и веса детали (понятно и конкретно).
+- Объясни ЗАЧЕМ выбран именно такой режим (3D или 5D) — без жаргона.
+- Скажи какой материал и почему именно он.
+- Перечисли главные настройки и что они дают на практике.
+- Закончи фразой о том, сколько это займёт / сэкономит.
 """
 
 
@@ -108,6 +116,8 @@ class AssistantBridge(QObject):
     lastErrorChanged = pyqtSignal()
     modelLoadedSignal = pyqtSignal()
     structuralAnalysisReady = pyqtSignal()
+    settingsApplied = pyqtSignal()
+    printModeReady = pyqtSignal()
     _main_thread_request = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -135,6 +145,10 @@ class AssistantBridge(QObject):
         self._tool_rounds = 0
         # Structural analysis result cache (for QML access)
         self._last_structural_result = {}
+        # Applied settings cache (for QML display)
+        self._last_applied_settings = []
+        # Print mode recommendation cache (for QML display)
+        self._last_print_mode_result = {}
 
     # ------------------------------------------------------------------ #
     # Main-thread dispatcher                                               #
@@ -288,6 +302,27 @@ class AssistantBridge(QObject):
             requires_confirmation=True,
         )
 
+        # ---- print mode recommendation ----
+        registry.register(
+            "scene.recommend_print_mode",
+            (
+                "Analyse a mesh object's geometry and automatically recommend: "
+                "print mode (3D or 5D), best material (PLA/PETG/ABS/TPU/NYLON), "
+                "estimated volume and mass in grams, complexity level, and a "
+                "beginner-friendly explanation in Russian. "
+                "Call this FIRST for every loaded model before applying settings."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": ["string", "number"]},
+                },
+                "required": ["object_id"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.get_print_mode_recommendation,
+        )
+
         # ---- settings tools ----
         registry.register(
             "settings.get",
@@ -318,7 +353,31 @@ class AssistantBridge(QObject):
                 "additionalProperties": False,
             },
             self._slicer_tools.apply_settings,
-            requires_confirmation=True,
+        )
+        registry.register(
+            "settings.apply_print_profile",
+            (
+                "Apply a complete print profile in one call: material, temperature, "
+                "speed, layer height, infill %, supports on/off, print mode (3D or 5D). "
+                "Use the recommended_mode from scene.recommend_print_mode and "
+                "infill/wall/layer values from scene.get_structural_analysis. "
+                "No confirmation needed — applies immediately."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "material":     {"type": "string",  "description": "PLA | PETG | ABS | TPU | NYLON"},
+                    "layer_height": {"type": "number",  "description": "Layer height mm (e.g. 0.2)"},
+                    "print_speed":  {"type": "integer", "description": "Print speed mm/s"},
+                    "temperature":  {"type": "integer", "description": "Nozzle temperature °C"},
+                    "infill":       {"type": "integer", "description": "Infill density 0-100 %"},
+                    "supports":     {"type": "boolean", "description": "Enable support structures"},
+                    "mode":         {"type": "string",  "enum": ["3D", "5D"], "description": "Print mode"},
+                },
+                "required": ["material"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.apply_print_profile,
         )
 
         # ---- backend tools ----
@@ -445,6 +504,16 @@ class AssistantBridge(QObject):
         """JSON-строка последнего структурного анализа для QML."""
         return json.dumps(self._last_structural_result, ensure_ascii=False)
 
+    @pyqtProperty(str, notify=settingsApplied)
+    def lastAppliedSettings(self):
+        """JSON-строка списка применённых настроек для QML."""
+        return json.dumps(self._last_applied_settings, ensure_ascii=False)
+
+    @pyqtProperty(str, notify=printModeReady)
+    def lastPrintModeResult(self):
+        """JSON-строка последней рекомендации режима печати для QML."""
+        return json.dumps(self._last_print_mode_result, ensure_ascii=False)
+
     def _set_status(self, value):
         self._status = value
         self.statusChanged.emit()
@@ -561,11 +630,33 @@ class AssistantBridge(QObject):
                 "confirmed": confirmed,
             },
         })
+        # Cache print mode recommendation for QML
+        if name == "scene.recommend_print_mode" and not self._requires_confirmation(response):
+            try:
+                self._last_print_mode_result = self._extract_tool_result(response)
+                self.printModeReady.emit()
+            except Exception:
+                pass
         # Cache structural analysis result for QML
         if name == "scene.get_structural_analysis" and not self._requires_confirmation(response):
             try:
                 self._last_structural_result = self._extract_tool_result(response)
                 self.structuralAnalysisReady.emit()
+            except Exception:
+                pass
+        # Cache applied settings (both settings.apply and settings.apply_print_profile)
+        if name in ("settings.apply", "settings.apply_print_profile") and not self._requires_confirmation(response):
+            try:
+                res = self._extract_tool_result(response)
+                applied = res.get("applied", [])
+                if applied:
+                    self._last_applied_settings = applied
+                    self.settingsApplied.emit()
+                    Logger.log(
+                        "i",
+                        "AI Assistant: settings applied count=%d",
+                        len(applied),
+                    )
             except Exception:
                 pass
         return response

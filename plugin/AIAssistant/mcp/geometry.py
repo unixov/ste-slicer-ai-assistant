@@ -430,3 +430,195 @@ def estimate_structural_zones(node):
     )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Print mode recommendation: 3D vs 5D + material suggestion
+# Based on aurora GeometryAnalyzer logic, adapted for UM bbox (no trimesh).
+# ---------------------------------------------------------------------------
+
+# Plastic density kg/cm³ for mass estimation
+_MATERIAL_DENSITY = {
+    "PLA":   1.24,
+    "PETG":  1.27,
+    "ABS":   1.04,
+    "TPU":   1.20,
+    "NYLON": 1.14,
+    "PA":    1.14,
+}
+
+
+def recommend_print_mode(node):
+    """
+    Анализирует геометрию узла сцены и рекомендует:
+      - режим печати: 3D или 5D
+      - материал: PLA / PETG / ABS / TPU / NYLON
+      - структурный риск
+      - массу и объём детали (оценка по bounding box и коэффициенту заполнения)
+
+    Не требует trimesh — работает только с bounding box и счётчиком полигонов.
+
+    Параметры
+    ---------
+    node : UM.Scene.SceneNode
+
+    Возвращает
+    ----------
+    dict с ключами:
+        recommended_mode     : "3D" или "5D"
+        mode_reason          : str — простое объяснение для пользователя
+        recommended_material : str — PLA / PETG / ABS / TPU / NYLON
+        material_reason      : str — почему именно этот материал
+        dimensions_mm        : dict — габариты {x, y, z}
+        volume_bbox_cm3      : float — объём описывающего параллелепипеда в см³
+        estimated_volume_cm3 : float — оценка объёма детали (~40% от bbox)
+        estimated_mass_g     : dict  — масса в граммах для каждого материала
+        overhang_likely      : bool — вероятно ли наличие нависаний
+        aspect_ratio         : float — соотношение макс/мин сторон
+        print_complexity     : str — "simple" / "moderate" / "complex"
+        beginner_summary     : str — объяснение для начинающего пользователя
+    """
+    geo = analyse_mesh(node)
+    bbox = geo.get("bbox") or {}
+    w = bbox.get("width", 0.0)
+    h = bbox.get("height", 0.0)
+    d = bbox.get("depth", 0.0)
+
+    result = {
+        "recommended_mode":     "3D",
+        "mode_reason":          "",
+        "recommended_material": "PLA",
+        "material_reason":      "",
+        "dimensions_mm":        {"x": round(w, 2), "y": round(h, 2), "z": round(d, 2)},
+        "volume_bbox_cm3":      0.0,
+        "estimated_volume_cm3": 0.0,
+        "estimated_mass_g":     {},
+        "overhang_likely":      False,
+        "aspect_ratio":         1.0,
+        "print_complexity":     "simple",
+        "beginner_summary":     "",
+    }
+
+    if not (w > 0 and h > 0 and d > 0):
+        result["beginner_summary"] = "Не удалось определить размеры модели."
+        return result
+
+    dims = sorted([w, h, d])  # [min, mid, max]
+    aspect = dims[2] / (dims[0] + 1e-8)
+    vol_bbox_mm3 = w * h * d
+    vol_bbox_cm3 = vol_bbox_mm3 / 1000.0
+    # Typical solid fill fraction for FDM part ~35-45% of bbox
+    est_vol_cm3 = round(vol_bbox_cm3 * 0.40, 3)
+
+    result["aspect_ratio"]      = round(aspect, 2)
+    result["volume_bbox_cm3"]   = round(vol_bbox_cm3, 3)
+    result["estimated_volume_cm3"] = est_vol_cm3
+
+    # Mass estimate for each material
+    for mat, density in _MATERIAL_DENSITY.items():
+        result["estimated_mass_g"][mat] = round(est_vol_cm3 * density * 1000 / 1000 * density, 1)
+    # Correct: density in g/cm³, volume in cm³ → mass in g
+    for mat, density in _MATERIAL_DENSITY.items():
+        result["estimated_mass_g"][mat] = round(est_vol_cm3 * density, 1)
+
+    # -----------------------------------------------------------------------
+    # 3D vs 5D recommendation
+    # Aurora logic: overhangs > 45° or high aspect ratio → 5D
+    # We estimate overhangs from geometry: very tall & thin column, or
+    # high face count with complex shape (vertex_count / face ratio).
+    # -----------------------------------------------------------------------
+    vertex_count = geo.get("vertex_count", 0)
+    face_count   = geo.get("face_count", 0)
+
+    # Heuristic: overhang likely if aspect ratio > 3 (tall thin column)
+    # or if the part is wider than tall (horizontal bridges)
+    overhang_likely = False
+    if aspect > 4.0:
+        overhang_likely = True  # very elongated — likely needs 5D orientation
+    if h > 0 and w > 0 and d > 0:
+        # Low flat part with protrusions estimated by vertex density
+        if h < 10.0 and face_count > 5000:
+            overhang_likely = True  # complex flat part
+        if h / max(w, d) < 0.15 and face_count > 2000:
+            overhang_likely = True  # very flat with many faces → overhangs likely
+
+    result["overhang_likely"] = overhang_likely
+
+    if overhang_likely or aspect > 4.0:
+        result["recommended_mode"] = "5D"
+        if aspect > 4.0:
+            result["mode_reason"] = (
+                "Деталь очень вытянутая (соотношение сторон {:.1f}:1). "
+                "5D-печать повернёт слои вдоль длинной оси — деталь будет "
+                "значительно прочнее и не потребует поддержек.".format(aspect)
+            )
+        else:
+            result["mode_reason"] = (
+                "Деталь плоская и сложная — скорее всего есть нависания > 45°. "
+                "5D-печать позволяет печатать такие детали без поддержек, "
+                "экономя пластик и время."
+            )
+    else:
+        result["recommended_mode"] = "3D"
+        result["mode_reason"] = (
+            "Деталь простой формы, нависаний не обнаружено. "
+            "Стандартная 3D-печать подойдёт отлично."
+        )
+
+    # -----------------------------------------------------------------------
+    # Complexity
+    # -----------------------------------------------------------------------
+    if face_count > 50000 or aspect > 5:
+        result["print_complexity"] = "complex"
+    elif face_count > 10000 or aspect > 2.5 or overhang_likely:
+        result["print_complexity"] = "moderate"
+    else:
+        result["print_complexity"] = "simple"
+
+    # -----------------------------------------------------------------------
+    # Material recommendation
+    # -----------------------------------------------------------------------
+    # Without user input we recommend based on part size and complexity.
+    # Large / heavy parts → PETG (better than PLA for functional use).
+    # Very small / decorative → PLA.
+    # Complex / mechanical → PETG as safe default.
+    if est_vol_cm3 > 50 or result["print_complexity"] == "complex":
+        mat = "PETG"
+        mat_reason = (
+            "Деталь большая или сложная. PETG прочнее PLA, "
+            "не боится влаги и подходит для функциональных деталей."
+        )
+    elif est_vol_cm3 < 2 and result["print_complexity"] == "simple":
+        mat = "PLA"
+        mat_reason = (
+            "Небольшая простая деталь. PLA — самый простой в печати "
+            "материал, даёт хорошее качество поверхности."
+        )
+    else:
+        mat = "PLA"
+        mat_reason = (
+            "PLA — универсальный материал для большинства деталей. "
+            "Если деталь несёт нагрузку, рассмотрите PETG."
+        )
+
+    result["recommended_material"] = mat
+    result["material_reason"]      = mat_reason
+
+    # -----------------------------------------------------------------------
+    # Beginner-friendly summary
+    # -----------------------------------------------------------------------
+    mass_g = result["estimated_mass_g"].get(mat, 0)
+    result["beginner_summary"] = (
+        "Деталь {w:.0f} x {d:.0f} x {h:.0f} мм, примерно {mass:.0f} г ({mat}). "
+        "Режим: {mode}. {mode_reason} "
+        "Материал: {mat} — {mat_reason}"
+    ).format(
+        w=w, d=d, h=h,
+        mass=mass_g,
+        mat=mat,
+        mode=result["recommended_mode"],
+        mode_reason=result["mode_reason"],
+        mat_reason=mat_reason,
+    )
+
+    return result

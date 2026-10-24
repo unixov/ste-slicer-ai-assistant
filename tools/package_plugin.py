@@ -13,11 +13,15 @@ ARCHIVE_NAME = "AIAssistant.zip"
 def should_skip(path):
     relative = os.path.relpath(path, PLUGIN_DIR)
     parts = relative.split(os.sep)
+    basename = os.path.basename(path)
+    # Always include .env so the API key travels with the installed plugin
+    if basename == ".env":
+        return False
     return (
         "__pycache__" in parts
         or relative.endswith(".pyc")
         or relative.endswith(".pyo")
-        or os.path.basename(path).startswith(".")
+        or basename.startswith(".")
     )
 
 

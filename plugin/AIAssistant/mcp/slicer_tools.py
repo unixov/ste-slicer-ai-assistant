@@ -9,7 +9,17 @@ from UM.Operations.TranslateOperation import TranslateOperation
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
 from UM.Scene.Selection import Selection
 
-from .geometry import analyse_mesh, estimate_structural_zones
+from .geometry import analyse_mesh, estimate_structural_zones, recommend_print_mode
+
+# Material nozzle temperatures (from aurora slicer_api.py)
+_MATERIAL_TEMPS = {
+    "PLA":   210,
+    "PETG":  240,
+    "ABS":   250,
+    "TPU":   230,
+    "NYLON": 260,
+    "PA":    260,
+}
 
 
 class SlicerTools(object):
@@ -245,6 +255,134 @@ class SlicerTools(object):
             geo["name"] = get_name() if callable(get_name) else ""
             return geo
         raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # scene.recommend_print_mode  — 3D vs 5D + material auto-select       #
+    # ------------------------------------------------------------------ #
+
+    def get_print_mode_recommendation(self, arguments):
+        """
+        Анализирует геометрию объекта и рекомендует режим печати (3D/5D),
+        материал, оценивает объём и массу детали.
+        Понятное объяснение для начинающего пользователя.
+        """
+        arguments = arguments or {}
+        object_id = arguments.get("object_id")
+        if object_id is None:
+            raise ValueError("object_id is required")
+        return self._dispatch(lambda: self._get_print_mode_recommendation(object_id))
+
+    def _get_print_mode_recommendation(self, object_id):
+        scene = self._application.getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            nid = self._resolve_node_id(node)
+            if str(nid) != str(object_id):
+                continue
+            if node.getMeshData() is None:
+                raise ValueError("Object is not a mesh: " + str(object_id))
+
+            rec = recommend_print_mode(node)
+            get_name = getattr(node, "getName", None)
+            rec["id"]   = nid
+            rec["name"] = get_name() if callable(get_name) else ""
+            Logger.log(
+                "i",
+                "AI Assistant: print mode recommendation for %s — mode=%s, material=%s",
+                nid,
+                rec.get("recommended_mode"),
+                rec.get("recommended_material"),
+            )
+            return rec
+        raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # settings.apply_print_profile  — full profile in one call            #
+    # ------------------------------------------------------------------ #
+
+    def apply_print_profile(self, arguments):
+        """
+        Применяет полный профиль печати: материал, температура, скорость,
+        высота слоя, заполнение, поддержки, режим 3D/5D.
+        Понятный ответ с объяснением каждого параметра.
+        """
+        arguments = arguments or {}
+        material     = str(arguments.get("material", "PLA")).upper()
+        layer_height = float(arguments.get("layer_height", 0.2))
+        print_speed  = int(arguments.get("print_speed", 50))
+        temperature  = int(arguments.get("temperature",
+                                          _MATERIAL_TEMPS.get(material, 210)))
+        infill       = int(arguments.get("infill", 20))
+        supports     = bool(arguments.get("supports", False))
+        mode         = str(arguments.get("mode", "3D"))
+
+        if mode not in ("3D", "5D"):
+            raise ValueError("mode must be '3D' or '5D'")
+
+        return self._dispatch(
+            lambda: self._apply_print_profile(
+                material, layer_height, print_speed, temperature, infill, supports, mode
+            )
+        )
+
+    def _apply_print_profile(
+        self, material, layer_height, print_speed, temperature, infill, supports, mode
+    ):
+        stack = self._application.getGlobalContainerStack()
+        if stack is None:
+            raise RuntimeError("Нет активного стека настроек.")
+
+        # Map mode to STE Slicer printing_mode value
+        printing_mode_value = "classic" if mode == "3D" else "cylindrical"
+
+        settings = {
+            "material_print_temperature": temperature,
+            "layer_height":               layer_height,
+            "print_speed":                print_speed,
+            "infill_sparse_density":      infill,
+            "support_enable":             supports,
+            "printing_mode":              printing_mode_value,
+        }
+
+        applied  = []
+        rejected = []
+        for key, value in settings.items():
+            try:
+                stack.setProperty(key, "value", value)
+                applied.append({"key": key, "value": value})
+                Logger.log("i", "AI Assistant: profile setting %s = %s", key, value)
+            except Exception as exc:
+                Logger.log("w", "AI Assistant: failed profile setting %s: %s", key, exc)
+                rejected.append({"key": key, "error": str(exc)})
+
+        # Human-readable explanation
+        supports_text = "да" if supports else "нет"
+        explanation = (
+            "Применён профиль: материал {mat}, температура {temp}°C, "
+            "скорость {speed} мм/с, слой {layer} мм, заполнение {infill}%, "
+            "поддержки — {sup}, режим печати — {mode}.".format(
+                mat=material,
+                temp=temperature,
+                speed=print_speed,
+                layer=layer_height,
+                infill=infill,
+                sup=supports_text,
+                mode=mode,
+            )
+        )
+
+        return {
+            "accepted":    True,
+            "material":    material,
+            "temperature": temperature,
+            "layer_height": layer_height,
+            "print_speed": print_speed,
+            "infill":      infill,
+            "supports":    supports,
+            "mode":        mode,
+            "applied":     applied,
+            "rejected":    rejected,
+            "explanation": explanation,
+        }
 
     # ------------------------------------------------------------------ #
     # scene.get_structural_analysis  *** KILLER FEATURE ***               #

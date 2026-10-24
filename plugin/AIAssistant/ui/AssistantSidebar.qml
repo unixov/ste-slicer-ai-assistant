@@ -24,6 +24,33 @@ Rectangle {
     property bool structExpanded:     true
 
     // ------------------------------------------------------------------ //
+    // Applied settings state
+    // ------------------------------------------------------------------ //
+    property var  appliedSettings:    ([])
+    property bool hasApplied:         root.appliedSettings.length > 0
+    property bool appliedExpanded:    true
+
+    // Human-readable labels for slicer keys
+    function settingLabel(key) {
+        var m = {
+            "printing_mode":              "Режим печати",
+            "layer_height":               "Высота слоя (мм)",
+            "layer_height_0":             "Высота 1-го слоя (мм)",
+            "infill_sparse_density":      "Заполнение (%)",
+            "infill_pattern":             "Паттерн заполнения",
+            "wall_line_count":            "Количество стенок",
+            "support_enable":             "Поддержки",
+            "support_type":               "Тип поддержек",
+            "material_print_temperature": "Температура (°C)",
+            "print_speed":                "Скорость (мм/с)",
+            "retraction_enable":          "Ретракция",
+            "retraction_amount":          "Длина ретракции (мм)",
+            "adhesion_type":              "Адгезия"
+        }
+        return m[key] || key
+    }
+
+    // ------------------------------------------------------------------ //
     // Chat message model
     // ------------------------------------------------------------------ //
     ListModel {
@@ -58,14 +85,22 @@ Rectangle {
     function toolHumanName(n) {
         var m = {
             "scene.arrange_all":           "Авторасстановка моделей",
-            "scene.move_object":           "Переместить объект",
-            "scene.rotate_object":         "Повернуть объект",
-            "settings.apply":              "Применить настройки",
-            "backend.start_slicing":       "Запустить слайсинг",
-            "export.scene":                "Экспортировать сцену"
+            "scene.move_object":                 "Переместить объект",
+            "scene.rotate_object":               "Повернуть объект",
+            "settings.apply":                    "Применить настройки",
+            "settings.apply_print_profile":      "Применить профиль печати",
+            "backend.start_slicing":             "Запустить слайсинг",
+            "export.scene":                      "Экспортировать сцену"
         }
         return m[n] || n
     }
+
+    // ------------------------------------------------------------------ //
+    // Print mode recommendation state
+    // ------------------------------------------------------------------ //
+    property var  printModeData:    ({})
+    property bool hasPrintMode:     Object.keys(root.printModeData).length > 0
+    property bool printModeExpanded: true
 
     // ------------------------------------------------------------------ //
     // Bridge connections
@@ -91,6 +126,22 @@ Rectangle {
                 root.structExpanded  = true
             } catch(e) {
                 root.structuralData = {}
+            }
+        }
+        onPrintModeReady: {
+            try {
+                root.printModeData    = JSON.parse(aiAssistantBridge.lastPrintModeResult)
+                root.printModeExpanded = true
+            } catch(e) {
+                root.printModeData = {}
+            }
+        }
+        onSettingsApplied: {
+            try {
+                root.appliedSettings = JSON.parse(aiAssistantBridge.lastAppliedSettings)
+                root.appliedExpanded = true
+            } catch(e) {
+                root.appliedSettings = []
             }
         }
     }
@@ -139,6 +190,136 @@ Rectangle {
                     loops:   Animation.Infinite
                     NumberAnimation { to: 0.2; duration: 600 }
                     NumberAnimation { to: 1.0; duration: 600 }
+                }
+            }
+        }
+
+        // ============================================================== //
+        // PRINT MODE & MATERIAL RECOMMENDATION CARD
+        // ============================================================== //
+        Rectangle {
+            Layout.fillWidth: true
+            visible:          root.hasPrintMode
+            color:            "transparent"
+            border.width:     1
+            border.color:     root.printModeData.recommended_mode === "5D" ? "#9b59b6" : "#2980b9"
+            radius:           4
+            implicitHeight:   pmHeader.implicitHeight + 16 +
+                              (root.printModeExpanded ? pmBody.implicitHeight + 8 : 0)
+
+            Behavior on implicitHeight { NumberAnimation { duration: 150 } }
+
+            RowLayout {
+                id: pmHeader
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 8 }
+                spacing: 6
+
+                Label {
+                    Layout.fillWidth: true
+                    text:  "Режим и материал"
+                    color: root.printModeData.recommended_mode === "5D" ? "#9b59b6" : "#2980b9"
+                    font:  UM.Theme.getFont("default_bold")
+                }
+
+                // Mode badge
+                Rectangle {
+                    color:  root.printModeData.recommended_mode === "5D" ? "#9b59b6" : "#2980b9"
+                    radius: 3
+                    width:  modeBadgeLbl.implicitWidth + 10
+                    height: modeBadgeLbl.implicitHeight + 4
+                    Label {
+                        id: modeBadgeLbl
+                        anchors.centerIn: parent
+                        text:  root.printModeData.recommended_mode || "3D"
+                        color: "white"
+                        font:  UM.Theme.getFont("small")
+                    }
+                }
+
+                // Material badge
+                Rectangle {
+                    visible: root.printModeData.recommended_material !== undefined
+                    color:   "#16a085"
+                    radius:  3
+                    width:   matBadgeLbl.implicitWidth + 10
+                    height:  matBadgeLbl.implicitHeight + 4
+                    Label {
+                        id: matBadgeLbl
+                        anchors.centerIn: parent
+                        text:  root.printModeData.recommended_material || ""
+                        color: "white"
+                        font:  UM.Theme.getFont("small")
+                    }
+                }
+
+                Label {
+                    text:  root.printModeExpanded ? "▲" : "▼"
+                    color: root.printModeData.recommended_mode === "5D" ? "#9b59b6" : "#2980b9"
+                    font:  UM.Theme.getFont("small")
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.printModeExpanded = !root.printModeExpanded
+                    }
+                }
+            }
+
+            Column {
+                id: pmBody
+                anchors { left: parent.left; right: parent.right; top: pmHeader.bottom; margins: 8 }
+                spacing: 5
+                visible: root.printModeExpanded
+                opacity: root.printModeExpanded ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                // Beginner summary — the most important line
+                Label {
+                    width:    parent.width
+                    text:     root.printModeData.beginner_summary || ""
+                    color:    textColor
+                    font:     UM.Theme.getFont("default")
+                    wrapMode: Text.WordWrap
+                }
+
+                // Divider
+                Rectangle { width: parent.width; height: 1; color: borderColor }
+
+                // Dimensions + estimated mass row
+                RowLayout {
+                    width: parent.width
+                    spacing: 8
+
+                    Label {
+                        text: {
+                            var d = root.printModeData.dimensions_mm
+                            if (!d) return ""
+                            return d.x.toFixed(0) + " x " + d.z.toFixed(0) + " x " + d.y.toFixed(0) + " мм"
+                        }
+                        color: mutedColor
+                        font:  UM.Theme.getFont("small")
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: {
+                            var m = root.printModeData.estimated_mass_g
+                            var mat = root.printModeData.recommended_material
+                            if (!m || !mat) return ""
+                            return "~" + m[mat].toFixed(0) + " г (" + mat + ")"
+                        }
+                        color: mutedColor
+                        font:  UM.Theme.getFont("small")
+                        horizontalAlignment: Text.AlignRight
+                    }
+                }
+
+                // Material reason
+                Label {
+                    width:    parent.width
+                    visible:  root.printModeData.material_reason !== undefined
+                    text:     root.printModeData.material_reason || ""
+                    color:    mutedColor
+                    font:     UM.Theme.getFont("small")
+                    wrapMode: Text.WordWrap
                 }
             }
         }
@@ -301,6 +482,97 @@ Rectangle {
                         addUserMessage(msg)
                         aiAssistantBridge.sendMessage(msg)
                         messageList.positionViewAtEnd()
+                    }
+                }
+            }
+        }
+
+        // ============================================================== //
+        // APPLIED SETTINGS CARD
+        // ============================================================== //
+        Rectangle {
+            Layout.fillWidth: true
+            visible:          root.hasApplied
+            color:            "transparent"
+            border.width:     1
+            border.color:     "#27ae60"
+            radius:           4
+            implicitHeight:   appliedHeader.implicitHeight + 16 +
+                              (root.appliedExpanded ? appliedBody.implicitHeight + 8 : 0)
+
+            Behavior on implicitHeight { NumberAnimation { duration: 150 } }
+
+            RowLayout {
+                id: appliedHeader
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 8 }
+                spacing: 6
+
+                Label {
+                    Layout.fillWidth: true
+                    text:  "Настройки применены"
+                    color: "#27ae60"
+                    font:  UM.Theme.getFont("default_bold")
+                }
+
+                Rectangle {
+                    color:  "#27ae60"
+                    radius: 3
+                    width:  appliedCountLabel.implicitWidth + 10
+                    height: appliedCountLabel.implicitHeight + 4
+                    Label {
+                        id: appliedCountLabel
+                        anchors.centerIn: parent
+                        text:  root.appliedSettings.length + " параметров"
+                        color: "white"
+                        font:  UM.Theme.getFont("small")
+                    }
+                }
+
+                Label {
+                    text:  root.appliedExpanded ? "▲" : "▼"
+                    color: "#27ae60"
+                    font:  UM.Theme.getFont("small")
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.appliedExpanded = !root.appliedExpanded
+                    }
+                }
+            }
+
+            Column {
+                id: appliedBody
+                anchors {
+                    left: parent.left; right: parent.right
+                    top:  appliedHeader.bottom; margins: 8
+                }
+                spacing: 4
+                visible: root.appliedExpanded
+                opacity: root.appliedExpanded ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                Repeater {
+                    model: root.appliedSettings
+                    delegate: RowLayout {
+                        width: appliedBody.width
+                        spacing: 8
+
+                        Label {
+                            Layout.fillWidth: true
+                            text:     root.settingLabel(modelData.key || "")
+                            color:    mutedColor
+                            font:     UM.Theme.getFont("small")
+                        }
+
+                        Label {
+                            text:  {
+                                var v = modelData.value
+                                if (v === true)  return "вкл"
+                                if (v === false) return "выкл"
+                                return String(v)
+                            }
+                            color: "#27ae60"
+                            font:  UM.Theme.getFont("small")
+                        }
                     }
                 }
             }

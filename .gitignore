@@ -16,6 +16,7 @@ venv/
 !.env.example
 **/secrets.*
 **/*credentials*
+plugin/AIAssistant/.env
 
 # Local STE Slicer checkout and installers
 STE-Slicer/
