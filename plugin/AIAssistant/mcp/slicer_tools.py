@@ -301,6 +301,23 @@ class SlicerTools(object):
     def get_settings(self, arguments):
         return self._dispatch(self._get_settings)
 
+    # Human-readable Russian names for slicer settings keys
+    _SETTING_LABELS = {
+        "printing_mode": "Режим печати",
+        "layer_height": "Высота слоя (мм)",
+        "infill_sparse_density": "Заполнение (%)",
+        "wall_line_count": "Количество стенок",
+        "support_enable": "Поддержки включены",
+        "material_print_temperature": "Температура печати (°C)",
+        "layer_height_0": "Высота первого слоя (мм)",
+        "infill_pattern": "Паттерн заполнения",
+        "print_speed": "Скорость печати (мм/с)",
+        "retraction_enable": "Ретракция включена",
+        "retraction_amount": "Длина ретракции (мм)",
+        "adhesion_type": "Адгезия к столу",
+        "support_type": "Тип поддержек",
+    }
+
     def _get_settings(self):
         stack = self._application.getGlobalContainerStack()
         if stack is None:
@@ -316,13 +333,23 @@ class SlicerTools(object):
         ]
         values = {}
         for key in keys:
+            label = self._SETTING_LABELS.get(key, key)
             try:
-                values[key] = stack.getProperty(key, "value")
+                values[label] = stack.getProperty(key, "value")
             except Exception:
-                values[key] = None
+                values[label] = None
+
+        machine_name = None
+        try:
+            machine_name = stack.getName()
+        except Exception:
+            try:
+                machine_name = stack.getId()
+            except Exception:
+                pass
 
         return {
-            "machine": stack.getId(),
+            "machine": machine_name,
             "settings": values,
         }
 
