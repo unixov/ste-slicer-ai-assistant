@@ -320,6 +320,12 @@ class AssistantBridge(QObject):
 
     @pyqtSlot(str, object)
     def _on_finished(self, reply, tool_calls):
+        Logger.log(
+            "d",
+            "AI Assistant: LLM response received (content_length=%s, tool_calls=%s)",
+            len(reply or ""),
+            len(tool_calls or []),
+        )
         if tool_calls:
             if self._tool_rounds >= 4:
                 self._set_status("Слишком много последовательных действий")
@@ -337,10 +343,16 @@ class AssistantBridge(QObject):
             self._thread.quit()
             return
 
-        self._history.append({"role": "assistant", "content": reply or ""})
+        display_reply = (reply or "").strip()
+        if not display_reply:
+            display_reply = (
+                "LLM завершила запрос без текстового ответа. "
+                "Проверь модель и формат ответа провайдера."
+            )
+        self._history.append({"role": "assistant", "content": display_reply})
         self._thread.quit()
         self._set_status("Готов к работе")
-        self.replyReady.emit(reply or "")
+        self.replyReady.emit(display_reply)
 
     @staticmethod
     def _parse_tool_arguments(call):
@@ -463,8 +475,10 @@ class AssistantBridge(QObject):
 
     @pyqtSlot(str)
     def _on_failed(self, error):
-        self._set_status("Ошибка запроса")
-        self.requestFailed.emit(error)
+        safe_error = str(error).strip() or "неизвестная ошибка"
+        self._set_status("Ошибка запроса: " + safe_error)
+        Logger.log("e", "AI Assistant: LLM request failed: %s", safe_error)
+        self.requestFailed.emit(safe_error)
         if self._thread is not None:
             self._thread.quit()
 
