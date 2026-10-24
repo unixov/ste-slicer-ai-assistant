@@ -21,6 +21,41 @@ from .mcp.server import McpServer
 from .mcp.slicer_tools import SlicerTools
 
 
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT_BASE = """\
+Ты — AI-инженер по 3D-печати в STE Slicer. Твоя суперспособность: \
+анализировать геометрию детали и определять зоны концентрации напряжений, \
+чтобы рекомендовать оптимальную ориентацию и адаптивные настройки заполнения.
+
+Язык: ТОЛЬКО русский. Никакого Markdown (без ** ## ``` | и прочих символов). \
+Пиши простым текстом, структурируй дефисами и пробелами.
+
+ИНСТРУМЕНТЫ — правила:
+1. Сначала читай, потом меняй: используй scene.list_objects и settings.get \
+перед любыми изменениями.
+2. Для структурного анализа ВСЕГДА сначала вызывай scene.get_structural_analysis \
+— он выдаст профиль нагружения, зоны риска, рекомендованные настройки и ориентацию.
+3. Применяй settings.apply и scene.rotate_object только после явного согласия \
+пользователя или после scene.get_structural_analysis.
+4. Не вызывай один инструмент дважды в одном ответе.
+5. После получения результатов инструментов — давай текстовый ответ, не вызывай ещё.
+6. Не утверждай, что изменил сцену, если это не подтверждено результатом инструмента.
+
+СТИЛЬ ОТВЕТА:
+- Для нагруженных деталей: кратко объясни профиль нагружения, назови зоны риска, \
+предложи конкретные действия (повернуть на N°, заполнение X%, паттерн Y, N стенок).
+- Указывай ожидаемый эффект: экономия материала, прирост прочности, время печати.
+- Задавай уточняющий вопрос в конце, если нужна информация о нагрузке или материале.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Thread helpers
+# ---------------------------------------------------------------------------
+
 class _MainThreadRequest(object):
     def __init__(self, callback):
         self.callback = callback
@@ -57,6 +92,10 @@ class LlmWorker(QObject):
             self.failed.emit("Непредвиденная ошибка LLM: " + str(error))
 
 
+# ---------------------------------------------------------------------------
+# AssistantBridge
+# ---------------------------------------------------------------------------
+
 class AssistantBridge(QObject):
     messageReceived = pyqtSignal(str)
     replyReady = pyqtSignal()
@@ -68,6 +107,7 @@ class AssistantBridge(QObject):
     lastReplyChanged = pyqtSignal()
     lastErrorChanged = pyqtSignal()
     modelLoadedSignal = pyqtSignal()
+    structuralAnalysisReady = pyqtSignal()
     _main_thread_request = pyqtSignal(object)
 
     def __init__(self, parent=None):
@@ -77,27 +117,7 @@ class AssistantBridge(QObject):
         self._last_error = ""
         self._known_mesh_ids = set()
         self._pending_auto_analysis = False
-        self._history = [
-            {
-                "role": "system",
-                "content": (
-                    "Ты ассистент по настройке 3D-печати в STE Slicer. "
-                    "Отвечай ТОЛЬКО на русском языке. "
-                    "НЕ ИСПОЛЬЗУЙ Markdown форматирование — пиши простым текстом "
-                    "без символов ** __ ## ``` | и других Markdown элементов. "
-                    "Используй только обычные дефисы и пробелы для структуры.\n\n"
-                    "Правила работы с инструментами:\n"
-                    "1. Вызывай каждый инструмент не более одного раза за диалог.\n"
-                    "2. После получения результатов инструментов ОБЯЗАТЕЛЬНО дай "
-                    "текстовый ответ пользователю — не вызывай инструменты снова.\n"
-                    "3. Если данные уже получены, используй их для ответа.\n"
-                    "4. Не утверждай, что изменил сцену, если это не подтверждено "
-                    "результатом инструмента.\n"
-                    "5. Изменяющие сцену действия выполняются только после явного "
-                    "подтверждения пользователя."
-                ),
-            }
-        ]
+        self._history = [{"role": "system", "content": _SYSTEM_PROMPT_BASE}]
         self._thread = None
         self._worker = None
         self._mcp_server = None
@@ -113,9 +133,11 @@ class AssistantBridge(QObject):
         self._confirmation_tool = ""
         self._confirmation_arguments = ""
         self._tool_rounds = 0
+        # Structural analysis result cache (for QML access)
+        self._last_structural_result = {}
 
     # ------------------------------------------------------------------ #
-    # Main-thread dispatcher (for tool calls from worker thread)           #
+    # Main-thread dispatcher                                               #
     # ------------------------------------------------------------------ #
 
     def _dispatch_slicer_callback(self, callback):
@@ -163,6 +185,8 @@ class AssistantBridge(QObject):
             dispatch=self._dispatch_slicer_callback,
         )
         registry = ToolRegistry()
+
+        # ---- read-only scene tools ----
         registry.register(
             "scene.list_objects",
             "List mesh objects currently loaded in STE Slicer with geometry info.",
@@ -189,6 +213,30 @@ class AssistantBridge(QObject):
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.get_selection,
         )
+
+        # ---- KILLER FEATURE: structural analysis ----
+        registry.register(
+            "scene.get_structural_analysis",
+            (
+                "Perform heuristic structural zone analysis on a mesh object. "
+                "Returns load profile (column/bracket/plate/general), stress zones with "
+                "risk scores 0-10, optimal print orientation recommendation, "
+                "adaptive infill densities for high/low stress zones, and concrete "
+                "slicer settings (infill %, pattern, wall count, layer height, print mode). "
+                "Use this FIRST whenever the user mentions load, strength, stress or durability."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": ["string", "number"]},
+                },
+                "required": ["object_id"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.get_structural_analysis,
+        )
+
+        # ---- mutating scene tools ----
         registry.register(
             "scene.arrange_all",
             "Arrange models on the active build plate.",
@@ -221,11 +269,59 @@ class AssistantBridge(QObject):
             requires_confirmation=True,
         )
         registry.register(
+            "scene.rotate_object",
+            (
+                "Rotate a mesh object around a world axis by the given angle in degrees. "
+                "Use this to apply the orientation recommended by scene.get_structural_analysis."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "object_id": {"type": ["string", "number"]},
+                    "axis": {"type": "string", "enum": ["x", "y", "z"]},
+                    "angle_deg": {"type": "number"},
+                },
+                "required": ["object_id", "axis", "angle_deg"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.rotate_object,
+            requires_confirmation=True,
+        )
+
+        # ---- settings tools ----
+        registry.register(
             "settings.get",
             "Read selected print settings and the active machine.",
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.get_settings,
         )
+        registry.register(
+            "settings.apply",
+            (
+                "Apply a set of print settings to the active machine stack. "
+                "Pass a dict of {setting_key: value}. "
+                "Supported keys: printing_mode, layer_height, infill_sparse_density, "
+                "infill_pattern, wall_line_count, support_enable, support_type, "
+                "material_print_temperature, print_speed, retraction_enable, "
+                "retraction_amount, adhesion_type. "
+                "Use recommended_settings from scene.get_structural_analysis directly."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "settings": {
+                        "type": "object",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["settings"],
+                "additionalProperties": False,
+            },
+            self._slicer_tools.apply_settings,
+            requires_confirmation=True,
+        )
+
+        # ---- backend tools ----
         registry.register(
             "backend.get_status",
             "Read the active slicing backend and its last observed state.",
@@ -239,6 +335,8 @@ class AssistantBridge(QObject):
             self._slicer_tools.start_slicing,
             requires_confirmation=True,
         )
+
+        # ---- export tools ----
         registry.register(
             "export.scene",
             "Export the current mesh scene to a new .gcode or .3mf file at an explicit path.",
@@ -260,6 +358,7 @@ class AssistantBridge(QObject):
             {"type": "object", "properties": {}, "additionalProperties": False},
             self._slicer_tools.get_export_status,
         )
+
         self._mcp_server = McpServer(registry)
 
     def _openai_tools(self):
@@ -278,7 +377,6 @@ class AssistantBridge(QObject):
         return tools
 
     def _extract_tool_result(self, mcp_response):
-        """Extract the plain Python object from an MCP tool response."""
         try:
             text = mcp_response["result"]["content"][0]["text"]
             return json.loads(text)
@@ -286,7 +384,6 @@ class AssistantBridge(QObject):
             return mcp_response
 
     def _scene_context(self):
-        """Build a clean scene context string for the system prompt."""
         if self._mcp_server is None:
             return "Состояние слайсера пока недоступно."
         try:
@@ -303,11 +400,7 @@ class AssistantBridge(QObject):
                  "params": {"name": "backend.get_status"}}
             ))
             return "Текущее состояние STE Slicer:\n" + json.dumps(
-                {
-                    "objects": objects,
-                    "settings": settings,
-                    "backend": backend,
-                },
+                {"objects": objects, "settings": settings, "backend": backend},
                 ensure_ascii=False,
                 indent=2,
             )
@@ -347,6 +440,11 @@ class AssistantBridge(QObject):
     def confirmationArguments(self):
         return self._confirmation_arguments
 
+    @pyqtProperty(str, notify=structuralAnalysisReady)
+    def lastStructuralResult(self):
+        """JSON-строка последнего структурного анализа для QML."""
+        return json.dumps(self._last_structural_result, ensure_ascii=False)
+
     def _set_status(self, value):
         self._status = value
         self.statusChanged.emit()
@@ -361,28 +459,13 @@ class AssistantBridge(QObject):
         if not text:
             return
         if self.busy:
-            # Queue auto-analysis if it was triggered while busy
             Logger.log("d", "AI Assistant: sendMessage skipped (busy): %s", text[:60])
             return
 
         self._history.append({"role": "user", "content": text})
         # Refresh system prompt with current scene state each time
         self._history[0]["content"] = (
-            "Ты ассистент по настройке 3D-печати в STE Slicer. "
-            "Отвечай ТОЛЬКО на русском языке. "
-            "НЕ ИСПОЛЬЗУЙ Markdown форматирование — пиши простым текстом "
-            "без символов ** __ ## ``` | и других Markdown элементов. "
-            "Используй только обычные дефисы и пробелы для структуры.\n\n"
-            "Правила работы с инструментами:\n"
-            "1. Вызывай каждый инструмент не более одного раза за диалог.\n"
-            "2. После получения результатов инструментов ОБЯЗАТЕЛЬНО дай "
-            "текстовый ответ пользователю — не вызывай инструменты снова.\n"
-            "3. Если данные уже получены, используй их для ответа.\n"
-            "4. Не утверждай, что изменил сцену, если это не подтверждено "
-            "результатом инструмента.\n"
-            "5. Изменяющие сцену действия выполняются только после явного "
-            "подтверждения пользователя.\n\n"
-            + self._scene_context()
+            _SYSTEM_PROMPT_BASE + "\n\n" + self._scene_context()
         )
         self.messageReceived.emit(text)
         self.requestStarted.emit()
@@ -391,7 +474,6 @@ class AssistantBridge(QObject):
         self._start_llm_request()
 
     def _start_llm_request(self):
-        # After 2 tool rounds, stop sending tools to force a text response
         force_text = self._tool_rounds >= 2
         self._thread = QThread(self)
         self._worker = LlmWorker(
@@ -469,7 +551,7 @@ class AssistantBridge(QObject):
         function = call.get("function", {})
         name = function.get("name", "")
         arguments = self._parse_tool_arguments(call)
-        return self._mcp_server.handle({
+        response = self._mcp_server.handle({
             "jsonrpc": "2.0",
             "id": call.get("id"),
             "method": "tools/call",
@@ -479,6 +561,14 @@ class AssistantBridge(QObject):
                 "confirmed": confirmed,
             },
         })
+        # Cache structural analysis result for QML
+        if name == "scene.get_structural_analysis" and not self._requires_confirmation(response):
+            try:
+                self._last_structural_result = self._extract_tool_result(response)
+                self.structuralAnalysisReady.emit()
+            except Exception:
+                pass
+        return response
 
     @staticmethod
     def _requires_confirmation(response):
@@ -561,10 +651,8 @@ class AssistantBridge(QObject):
                     "content": [{
                         "type": "text",
                         "text": json.dumps(
-                            {
-                                "cancelled": True,
-                                "message": "Операция отменена пользователем.",
-                            },
+                            {"cancelled": True,
+                             "message": "Операция отменена пользователем."},
                             ensure_ascii=False,
                         ),
                     }],
@@ -602,10 +690,11 @@ class AssistantBridge(QObject):
 
     @pyqtSlot(object)
     def onSceneChanged(self, node=None):
-        """Called when the scene changes; auto-analyses newly added mesh objects."""
-        # Only react if the changed node actually has mesh data
         if node is not None:
-            has_mesh = callable(getattr(node, "getMeshData", None)) and node.getMeshData() is not None
+            has_mesh = (
+                callable(getattr(node, "getMeshData", None))
+                and node.getMeshData() is not None
+            )
             if not has_mesh:
                 return
 
@@ -631,7 +720,6 @@ class AssistantBridge(QObject):
             new_objects = [o for o in objects if str(o.get("id", "")) in new_ids]
             Logger.log("d", "AI Assistant: new mesh object(s) detected: %s", new_ids)
 
-            # Emit notification first so QML shows it immediately
             self.modelLoadedSignal.emit()
 
             if self.busy:
@@ -641,14 +729,19 @@ class AssistantBridge(QObject):
             desc = json.dumps(new_objects, ensure_ascii=False, indent=2)
             prompt = (
                 "Пользователь загрузил новые объекты в STE Slicer:\n" + desc + "\n\n"
-                "Проанализируй геометрию (размеры, число полигонов, предупреждения), "
-                "и предложи оптимальные настройки слайсинга для этой детали."
+                "Выполни структурный анализ (scene.get_structural_analysis) для первого объекта. "
+                "Затем кратко объясни профиль нагружения, назови зоны риска и предложи "
+                "конкретные настройки для оптимальной прочности при минимальном расходе пластика."
             )
             self.sendMessage(prompt)
 
         except Exception as exc:
             Logger.log("w", "AI Assistant: onSceneChanged error: %s", exc)
 
+
+# ---------------------------------------------------------------------------
+# AssistantStage
+# ---------------------------------------------------------------------------
 
 class AssistantStage(SteSlicerStage):
     def __init__(self, parent=None):
@@ -662,7 +755,6 @@ class AssistantStage(SteSlicerStage):
         app = Application.getInstance()
         self._bridge.configure_mcp(app)
         app.engineCreatedSignal.connect(self._engineCreated)
-        # Connect scene changes to auto-analysis
         try:
             scene = app.getController().getScene()
             scene.sceneChanged.connect(self._bridge.onSceneChanged)

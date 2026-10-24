@@ -1,12 +1,15 @@
 import math
 
 from UM.Logger import Logger
+from UM.Math.Matrix import Matrix
 from UM.Math.Vector import Vector
+from UM.Operations.GroupedOperation import GroupedOperation
+from UM.Operations.RotateOperation import RotateOperation
 from UM.Operations.TranslateOperation import TranslateOperation
 from UM.Scene.Iterator.DepthFirstIterator import DepthFirstIterator
 from UM.Scene.Selection import Selection
 
-from .geometry import analyse_mesh
+from .geometry import analyse_mesh, estimate_structural_zones
 
 
 class SlicerTools(object):
@@ -17,6 +20,10 @@ class SlicerTools(object):
         self._backend_state = None
         self._backend_progress = None
         self._exporter = None
+
+    # ------------------------------------------------------------------ #
+    # scene.list_objects                                                   #
+    # ------------------------------------------------------------------ #
 
     def list_scene_objects(self, arguments):
         return self._dispatch(self._list_scene_objects)
@@ -31,6 +38,10 @@ class SlicerTools(object):
         Logger.log("d", "AI Assistant: scene.list_objects found %d mesh objects", len(objects))
         return {"objects": objects}
 
+    # ------------------------------------------------------------------ #
+    # scene.get_selection                                                  #
+    # ------------------------------------------------------------------ #
+
     def get_selection(self, arguments):
         return self._dispatch(self._get_selection)
 
@@ -42,22 +53,13 @@ class SlicerTools(object):
                 objects.append(item)
         return {"objects": objects}
 
+    # ------------------------------------------------------------------ #
+    # Shared node description helper                                       #
+    # ------------------------------------------------------------------ #
+
     @staticmethod
-    def _describe_mesh_node(node):
-        # Exclude known non-user nodes by class name
-        node_class = type(node).__name__
-        if node_class in ("BuildVolume", "NozzleMesh", "ConvexHullNode",
-                          "ConvexHullDecorator", "Camera", "Platform",
-                          "TranslateToolHandle", "RotateToolHandle",
-                          "ScaleToolHandle", "SceneNode"):
-            return None
-
-        # Must have actual mesh data
-        mesh = node.getMeshData()
-        if mesh is None:
-            return None
-
-        # Get node id — fall back to Python object id if getId() returns None
+    def _resolve_node_id(node):
+        """Consistent ID resolution: getId() with str(id(node)) fallback."""
         get_id = getattr(node, "getId", None)
         node_id = None
         try:
@@ -66,8 +68,23 @@ class SlicerTools(object):
             pass
         if node_id is None:
             node_id = str(id(node))
+        return node_id
 
-        # Get name — fall back to file name or id
+    @staticmethod
+    def _describe_mesh_node(node):
+        node_class = type(node).__name__
+        if node_class in ("BuildVolume", "NozzleMesh", "ConvexHullNode",
+                          "ConvexHullDecorator", "Camera", "Platform",
+                          "TranslateToolHandle", "RotateToolHandle",
+                          "ScaleToolHandle", "SceneNode"):
+            return None
+
+        mesh = node.getMeshData()
+        if mesh is None:
+            return None
+
+        node_id = SlicerTools._resolve_node_id(node)
+
         get_name = getattr(node, "getName", None)
         node_name = ""
         try:
@@ -99,6 +116,10 @@ class SlicerTools(object):
             pass
         return item
 
+    # ------------------------------------------------------------------ #
+    # scene.move_object                                                    #
+    # ------------------------------------------------------------------ #
+
     def move_object(self, arguments):
         arguments = arguments or {}
         object_id = arguments.get("object_id")
@@ -127,7 +148,8 @@ class SlicerTools(object):
     def _move_object(self, object_id, position):
         scene = self._application.getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
-            if str(node.getId()) != str(object_id):
+            nid = self._resolve_node_id(node)
+            if str(nid) != str(object_id):
                 continue
             if node.getMeshData() is None:
                 raise ValueError("Object is not a mesh: " + str(object_id))
@@ -140,12 +162,67 @@ class SlicerTools(object):
             operation.push()
             return {
                 "accepted": True,
-                "object_id": node.getId(),
+                "object_id": nid,
                 "position": dict(position),
                 "undoable": True,
                 "coordinate_system": "world",
             }
         raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # scene.rotate_object  (KILLER FEATURE helper)                        #
+    # ------------------------------------------------------------------ #
+
+    def rotate_object(self, arguments):
+        arguments = arguments or {}
+        object_id = arguments.get("object_id")
+        axis = arguments.get("axis", "x")
+        angle_deg = arguments.get("angle_deg")
+
+        if object_id is None or str(object_id).strip() == "":
+            raise ValueError("object_id is required")
+        if axis not in ("x", "y", "z"):
+            raise ValueError("axis must be 'x', 'y', or 'z'")
+        if isinstance(angle_deg, bool) or not isinstance(angle_deg, (int, float)):
+            raise ValueError("angle_deg must be a number")
+        angle_deg = float(angle_deg)
+        if not math.isfinite(angle_deg):
+            raise ValueError("angle_deg must be finite")
+
+        return self._dispatch(
+            lambda: self._rotate_object(object_id, axis, angle_deg)
+        )
+
+    def _rotate_object(self, object_id, axis, angle_deg):
+        scene = self._application.getController().getScene()
+        axis_vec = {"x": Vector(1, 0, 0), "y": Vector(0, 1, 0), "z": Vector(0, 0, 1)}[axis]
+        angle_rad = math.radians(angle_deg)
+
+        for node in DepthFirstIterator(scene.getRoot()):
+            nid = self._resolve_node_id(node)
+            if str(nid) != str(object_id):
+                continue
+            if node.getMeshData() is None:
+                raise ValueError("Object is not a mesh: " + str(object_id))
+
+            rotation = Matrix()
+            rotation.setByRotationAxis(angle_rad, axis_vec)
+
+            operation = RotateOperation(node, rotation)
+            operation.push()
+
+            return {
+                "accepted": True,
+                "object_id": nid,
+                "axis": axis,
+                "angle_deg": angle_deg,
+                "undoable": True,
+            }
+        raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # scene.analyse_object                                                 #
+    # ------------------------------------------------------------------ #
 
     def analyse_object(self, arguments):
         arguments = arguments or {}
@@ -157,13 +234,7 @@ class SlicerTools(object):
     def _analyse_object(self, object_id):
         scene = self._application.getController().getScene()
         for node in DepthFirstIterator(scene.getRoot()):
-            get_id = getattr(node, "getId", None)
-            if not callable(get_id):
-                continue
-            try:
-                nid = get_id()
-            except Exception:
-                continue
+            nid = self._resolve_node_id(node)
             if str(nid) != str(object_id):
                 continue
             if node.getMeshData() is None:
@@ -174,6 +245,176 @@ class SlicerTools(object):
             geo["name"] = get_name() if callable(get_name) else ""
             return geo
         raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # scene.get_structural_analysis  *** KILLER FEATURE ***               #
+    # ------------------------------------------------------------------ #
+
+    def get_structural_analysis(self, arguments):
+        """
+        Выполняет эвристический структурный анализ выбранного объекта.
+        Возвращает профиль нагружения, зоны риска, рекомендации по
+        ориентации и настройкам адаптивного заполнения.
+        """
+        arguments = arguments or {}
+        object_id = arguments.get("object_id")
+        if object_id is None:
+            raise ValueError("object_id is required")
+        return self._dispatch(lambda: self._get_structural_analysis(object_id))
+
+    def _get_structural_analysis(self, object_id):
+        scene = self._application.getController().getScene()
+        for node in DepthFirstIterator(scene.getRoot()):
+            nid = self._resolve_node_id(node)
+            if str(nid) != str(object_id):
+                continue
+            if node.getMeshData() is None:
+                raise ValueError("Object is not a mesh: " + str(object_id))
+
+            analysis = estimate_structural_zones(node)
+            get_name = getattr(node, "getName", None)
+            analysis["id"] = nid
+            analysis["name"] = get_name() if callable(get_name) else ""
+            Logger.log(
+                "i",
+                "AI Assistant: structural analysis done for %s — profile=%s, max_risk=%s",
+                nid,
+                analysis.get("stress_profile"),
+                max((z.get("risk_score", 0) for z in analysis.get("zones", [])), default=0),
+            )
+            return analysis
+        raise ValueError("Mesh object not found: " + str(object_id))
+
+    # ------------------------------------------------------------------ #
+    # settings.get                                                         #
+    # ------------------------------------------------------------------ #
+
+    def get_settings(self, arguments):
+        return self._dispatch(self._get_settings)
+
+    # Human-readable Russian names for slicer settings keys
+    _SETTING_LABELS = {
+        "printing_mode": "Режим печати",
+        "layer_height": "Высота слоя (мм)",
+        "infill_sparse_density": "Заполнение (%)",
+        "wall_line_count": "Количество стенок",
+        "support_enable": "Поддержки включены",
+        "material_print_temperature": "Температура печати (°C)",
+        "layer_height_0": "Высота первого слоя (мм)",
+        "infill_pattern": "Паттерн заполнения",
+        "print_speed": "Скорость печати (мм/с)",
+        "retraction_enable": "Ретракция включена",
+        "retraction_amount": "Длина ретракции (мм)",
+        "adhesion_type": "Адгезия к столу",
+        "support_type": "Тип поддержек",
+    }
+
+    # Extended keys read for a richer snapshot
+    _SETTING_KEYS_EXTENDED = [
+        "printing_mode",
+        "layer_height",
+        "layer_height_0",
+        "infill_sparse_density",
+        "infill_pattern",
+        "wall_line_count",
+        "support_enable",
+        "support_type",
+        "material_print_temperature",
+        "print_speed",
+        "retraction_enable",
+        "retraction_amount",
+        "adhesion_type",
+    ]
+
+    def _get_settings(self):
+        stack = self._application.getGlobalContainerStack()
+        if stack is None:
+            return {"machine": None, "settings": {}}
+
+        values = {}
+        for key in self._SETTING_KEYS_EXTENDED:
+            label = self._SETTING_LABELS.get(key, key)
+            try:
+                values[label] = stack.getProperty(key, "value")
+            except Exception:
+                values[label] = None
+
+        machine_name = None
+        try:
+            machine_name = stack.getName()
+        except Exception:
+            try:
+                machine_name = stack.getId()
+            except Exception:
+                pass
+
+        return {
+            "machine": machine_name,
+            "settings": values,
+        }
+
+    # ------------------------------------------------------------------ #
+    # settings.apply  *** NEW ***                                          #
+    # ------------------------------------------------------------------ #
+
+    def apply_settings(self, arguments):
+        """
+        Применяет указанный набор настроек слайсера к активному стеку.
+        Принимает словарь {ключ_настройки: значение}.
+        Возвращает список применённых и отклонённых ключей.
+        """
+        arguments = arguments or {}
+        settings = arguments.get("settings")
+        if not isinstance(settings, dict) or not settings:
+            raise ValueError("settings must be a non-empty object")
+        return self._dispatch(lambda: self._apply_settings(settings))
+
+    def _apply_settings(self, settings):
+        stack = self._application.getGlobalContainerStack()
+        if stack is None:
+            raise RuntimeError("Нет активного стека настроек (machine not configured).")
+
+        applied = []
+        rejected = []
+        for key, value in settings.items():
+            # skip internal annotation keys
+            if key.startswith("_"):
+                continue
+            try:
+                # Validate the key exists in the stack
+                current = stack.getProperty(key, "value")
+                if current is None and value is not None:
+                    # Key might not exist — try anyway, catch on set
+                    pass
+                stack.setProperty(key, "value", value)
+                applied.append({"key": key, "value": value})
+                Logger.log("i", "AI Assistant: applied setting %s = %s", key, value)
+            except Exception as exc:
+                Logger.log("w", "AI Assistant: failed to apply setting %s: %s", key, exc)
+                rejected.append({"key": key, "error": str(exc)})
+
+        return {
+            "accepted": True,
+            "applied": applied,
+            "rejected": rejected,
+            "applied_count": len(applied),
+            "rejected_count": len(rejected),
+        }
+
+    # ------------------------------------------------------------------ #
+    # scene.arrange_all                                                    #
+    # ------------------------------------------------------------------ #
+
+    def arrange_scene(self, arguments):
+        return self._dispatch(self._arrange_scene)
+
+    def _arrange_scene(self):
+        self._application.arrangeAll()
+        return {"accepted": True, "message": "Авторасстановка запущена."}
+
+    # ------------------------------------------------------------------ #
+    # export.scene / export.get_status                                    #
+    # ------------------------------------------------------------------ #
 
     def export_scene(self, arguments):
         arguments = arguments or {}
@@ -206,6 +447,10 @@ class SlicerTools(object):
                 "error": None,
             }
         return self._exporter.get_status()
+
+    # ------------------------------------------------------------------ #
+    # backend.start_slicing / backend.get_status                          #
+    # ------------------------------------------------------------------ #
 
     def start_slicing(self, arguments):
         return self._dispatch(self._start_slicing)
@@ -297,65 +542,3 @@ class SlicerTools(object):
             4: "Error",
             5: "Disabled",
         }.get(state, str(state))
-
-    def get_settings(self, arguments):
-        return self._dispatch(self._get_settings)
-
-    # Human-readable Russian names for slicer settings keys
-    _SETTING_LABELS = {
-        "printing_mode": "Режим печати",
-        "layer_height": "Высота слоя (мм)",
-        "infill_sparse_density": "Заполнение (%)",
-        "wall_line_count": "Количество стенок",
-        "support_enable": "Поддержки включены",
-        "material_print_temperature": "Температура печати (°C)",
-        "layer_height_0": "Высота первого слоя (мм)",
-        "infill_pattern": "Паттерн заполнения",
-        "print_speed": "Скорость печати (мм/с)",
-        "retraction_enable": "Ретракция включена",
-        "retraction_amount": "Длина ретракции (мм)",
-        "adhesion_type": "Адгезия к столу",
-        "support_type": "Тип поддержек",
-    }
-
-    def _get_settings(self):
-        stack = self._application.getGlobalContainerStack()
-        if stack is None:
-            return {"machine": None, "settings": {}}
-
-        keys = [
-            "printing_mode",
-            "layer_height",
-            "infill_sparse_density",
-            "wall_line_count",
-            "support_enable",
-            "material_print_temperature",
-        ]
-        values = {}
-        for key in keys:
-            label = self._SETTING_LABELS.get(key, key)
-            try:
-                values[label] = stack.getProperty(key, "value")
-            except Exception:
-                values[label] = None
-
-        machine_name = None
-        try:
-            machine_name = stack.getName()
-        except Exception:
-            try:
-                machine_name = stack.getId()
-            except Exception:
-                pass
-
-        return {
-            "machine": machine_name,
-            "settings": values,
-        }
-
-    def arrange_scene(self, arguments):
-        return self._dispatch(self._arrange_scene)
-
-    def _arrange_scene(self):
-        self._application.arrangeAll()
-        return {"accepted": True, "message": "Авторасстановка запущена."}
