@@ -70,30 +70,6 @@ python tools/package_plugin.py
 
 Точный каталог можно открыть через меню слайсера «Справка → Показать папку конфигурации», затем открыть подпапку `plugins`. Для пошаговой проверки используйте [`WINDOWS_SMOKE_TEST.md`](WINDOWS_SMOKE_TEST.md).
 
-## Настройка LLM
-
-Значения по умолчанию:
-
-- Base URL: `https://api.timeweb.ai/v1`
-- Model: `dashscope/qwen3.8-flash`
-
-Ключ не хранится в репозитории. Перед запуском слайсера задайте его локально:
-
-```text
-STE_SLICER_AI_API_KEY=<новый ключ организаторов>
-```
-
-При необходимости можно переопределить URL и модель:
-
-```text
-STE_SLICER_AI_BASE_URL=https://api.timeweb.ai/v1
-STE_SLICER_AI_MODEL=dashscope/qwen3.8-flash
-```
-
-Не добавляйте ключ в `README.md`, Python-файлы, QML-файлы, Git-коммиты или публичные issue. Ключ, опубликованный на странице хакатона, следует считать скомпрометированным и заменить.
-
-Текущая реализация отправляет `messages`, `model`, `temperature` и зарегистрированные инструменты в `/chat/completions`. Поддерживается цикл `LLM → tool_calls → MCP → tool result → LLM`; ответ читается из `choices[0].message`. API-ключ по-прежнему берётся только из переменной окружения.
-
 ## MCP-инструменты
 
 Внутри плагина реализован минимальный JSON-RPC 2.0 слой с методами `initialize`, `tools/list` и `tools/call`. Сейчас зарегистрированы:
