@@ -300,7 +300,6 @@ class AssistantBridge(QObject):
                 "additionalProperties": False,
             },
             self._slicer_tools.rotate_object,
-            requires_confirmation=True,
         )
 
         # ---- print mode recommendation ----

@@ -302,8 +302,8 @@ class SlicerTools(object):
     def apply_print_profile(self, arguments):
         """
         Применяет полный профиль печати: материал, температура, скорость,
-        высота слоя, заполнение, поддержки, режим 3D/5D.
-        Понятный ответ с объяснением каждого параметра.
+        высота слоя, заполнение, число стенок, поддержки, режим 3D/5D.
+        Все параметры применяются немедленно без подтверждения.
         """
         arguments = arguments or {}
         material     = str(arguments.get("material", "PLA")).upper()
@@ -312,6 +312,9 @@ class SlicerTools(object):
         temperature  = int(arguments.get("temperature",
                                           _MATERIAL_TEMPS.get(material, 210)))
         infill       = int(arguments.get("infill", 20))
+        wall_count   = arguments.get("wall_line_count")
+        if wall_count is not None:
+            wall_count = int(wall_count)
         supports     = bool(arguments.get("supports", False))
         mode         = str(arguments.get("mode", "3D"))
 
@@ -320,18 +323,19 @@ class SlicerTools(object):
 
         return self._dispatch(
             lambda: self._apply_print_profile(
-                material, layer_height, print_speed, temperature, infill, supports, mode
+                material, layer_height, print_speed, temperature,
+                infill, wall_count, supports, mode
             )
         )
 
     def _apply_print_profile(
-        self, material, layer_height, print_speed, temperature, infill, supports, mode
+        self, material, layer_height, print_speed, temperature,
+        infill, wall_count, supports, mode
     ):
         stack = self._application.getGlobalContainerStack()
         if stack is None:
             raise RuntimeError("Нет активного стека настроек.")
 
-        # Map mode to STE Slicer printing_mode value
         printing_mode_value = "classic" if mode == "3D" else "cylindrical"
 
         settings = {
@@ -342,6 +346,8 @@ class SlicerTools(object):
             "support_enable":             supports,
             "printing_mode":              printing_mode_value,
         }
+        if wall_count is not None:
+            settings["wall_line_count"] = wall_count
 
         applied  = []
         rejected = []
@@ -354,34 +360,31 @@ class SlicerTools(object):
                 Logger.log("w", "AI Assistant: failed profile setting %s: %s", key, exc)
                 rejected.append({"key": key, "error": str(exc)})
 
-        # Human-readable explanation
         supports_text = "да" if supports else "нет"
+        wall_text = ", стенки {}".format(wall_count) if wall_count else ""
         explanation = (
-            "Применён профиль: материал {mat}, температура {temp}°C, "
-            "скорость {speed} мм/с, слой {layer} мм, заполнение {infill}%, "
-            "поддержки — {sup}, режим печати — {mode}.".format(
-                mat=material,
-                temp=temperature,
-                speed=print_speed,
-                layer=layer_height,
-                infill=infill,
-                sup=supports_text,
-                mode=mode,
+            "Применён профиль: {mat}, {temp}°C, скорость {speed} мм/с, "
+            "слой {layer} мм, заполнение {infill}%{walls}, "
+            "поддержки — {sup}, режим — {mode}.".format(
+                mat=material, temp=temperature, speed=print_speed,
+                layer=layer_height, infill=infill, walls=wall_text,
+                sup=supports_text, mode=mode,
             )
         )
 
         return {
-            "accepted":    True,
-            "material":    material,
-            "temperature": temperature,
-            "layer_height": layer_height,
-            "print_speed": print_speed,
-            "infill":      infill,
-            "supports":    supports,
-            "mode":        mode,
-            "applied":     applied,
-            "rejected":    rejected,
-            "explanation": explanation,
+            "accepted":       True,
+            "material":       material,
+            "temperature":    temperature,
+            "layer_height":   layer_height,
+            "print_speed":    print_speed,
+            "infill":         infill,
+            "wall_line_count": wall_count,
+            "supports":       supports,
+            "mode":           mode,
+            "applied":        applied,
+            "rejected":       rejected,
+            "explanation":    explanation,
         }
 
     # ------------------------------------------------------------------ #
